@@ -5,7 +5,6 @@
       "pattern": [
         {
           "regexp": "^[*]{20} TEST '(.*) :: ([^']*)' (\\w*) [*]{20}",
-          "file": 2
           "code": 3,
           "fromPath": 1
         },
