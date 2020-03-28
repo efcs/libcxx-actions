@@ -20,7 +20,8 @@ jobs:
     - name: 'test problem matcher'
       if: always()
       run: |
-        echo "::add-matcher::lit-problem-matcher.json"
+        ls
+        echo "::add-matcher::./lit-problem-matcher.json"
         cat test/Inputs/libcxx_logs.txt
         echo "::remove-matcher owner=lit-problem-matcher::"
 
