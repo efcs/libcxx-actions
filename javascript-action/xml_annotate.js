@@ -45,7 +45,7 @@ let create_annotations_for_results = function(xml_file) {
       output += test_name;
       output += " FAILED\n ";
       output += failures[0].firstChild.data;
-      var sanitized_output = output.replace('\n', '%0A');
+      var sanitized_output = output;
       core.error(sanitized_output);
     }
   } catch (error) {
