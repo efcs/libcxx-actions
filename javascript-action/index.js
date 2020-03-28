@@ -8,7 +8,7 @@ async function run() {
 
     core.error('hello%0world');
     core.error('foo\nbar');
-    core.setFailed('this action always fails\nbecause%0Aof reasons')
+    core.setFailed('this action always fails\nbecause%0Aof reasons');
   } 
   catch (error) {
     core.setFailed(error.message);
