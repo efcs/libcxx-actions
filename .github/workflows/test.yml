@@ -14,5 +14,7 @@ jobs:
         echo $(ls -lart)
         export SINGLE_ERROR="$(cat test/Inputs/single_error.txt)"
         echo "::error ::$SINGLE_ERROR"
+    - name: 'action test'
+      uses: ./javascript-action/
 
 
