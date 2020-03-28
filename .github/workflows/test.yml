@@ -9,5 +9,8 @@ jobs:
     - name: 'breathing test'
       run: |
         echo '::error ::Something went wrong'
+        echo $(ls -lart)
+        export SINGLE_ERROR="$(cat test/Inputs/single_error.txt)"
+        echo "::error ::$SINGLE_ERROR"
 
 
