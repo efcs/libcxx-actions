@@ -43,6 +43,34 @@ module.exports =
 /************************************************************************/
 /******/ ({
 
+/***/ 2:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = getFirstPage
+
+const getPage = __webpack_require__(22)
+
+function getFirstPage (octokit, link, headers) {
+  return getPage(octokit, link, 'first', headers)
+}
+
+
+/***/ }),
+
+/***/ 5:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = octokitValidate;
+
+const validate = __webpack_require__(627);
+
+function octokitValidate(octokit) {
+  octokit.hook.before("request", validate.bind(null, octokit));
+}
+
+
+/***/ }),
+
 /***/ 7:
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
 
@@ -551,6 +579,22 @@ exports.HttpClient = HttpClient;
 
 /***/ }),
 
+/***/ 15:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = hasLastPage
+
+const deprecate = __webpack_require__(307)
+const getPageLinks = __webpack_require__(327)
+
+function hasLastPage (link) {
+  deprecate(`octokit.hasLastPage() – You can use octokit.paginate or async iterators instead: https://github.com/octokit/rest.js#pagination.`)
+  return getPageLinks(link).last
+}
+
+
+/***/ }),
+
 /***/ 16:
 /***/ (function(module) {
 
@@ -558,249 +602,13418 @@ module.exports = require("tls");
 
 /***/ }),
 
+/***/ 17:
+/***/ (function(__unusedmodule, exports) {
+
+"use strict";
+
+
+Object.defineProperty(exports, '__esModule', { value: true });
+
+const VERSION = "1.1.2";
+
+/**
+ * Some “list” response that can be paginated have a different response structure
+ *
+ * They have a `total_count` key in the response (search also has `incomplete_results`,
+ * /installation/repositories also has `repository_selection`), as well as a key with
+ * the list of the items which name varies from endpoint to endpoint:
+ *
+ * - https://developer.github.com/v3/search/#example (key `items`)
+ * - https://developer.github.com/v3/checks/runs/#response-3 (key: `check_runs`)
+ * - https://developer.github.com/v3/checks/suites/#response-1 (key: `check_suites`)
+ * - https://developer.github.com/v3/apps/installations/#list-repositories (key: `repositories`)
+ * - https://developer.github.com/v3/apps/installations/#list-installations-for-a-user (key `installations`)
+ *
+ * Octokit normalizes these responses so that paginated results are always returned following
+ * the same structure. One challenge is that if the list response has only one page, no Link
+ * header is provided, so this header alone is not sufficient to check wether a response is
+ * paginated or not. For the exceptions with the namespace, a fallback check for the route
+ * paths has to be added in order to normalize the response. We cannot check for the total_count
+ * property because it also exists in the response of Get the combined status for a specific ref.
+ */
+const REGEX = [/^\/search\//, /^\/repos\/[^/]+\/[^/]+\/commits\/[^/]+\/(check-runs|check-suites)([^/]|$)/, /^\/installation\/repositories([^/]|$)/, /^\/user\/installations([^/]|$)/, /^\/repos\/[^/]+\/[^/]+\/actions\/secrets([^/]|$)/, /^\/repos\/[^/]+\/[^/]+\/actions\/workflows(\/[^/]+\/runs)?([^/]|$)/, /^\/repos\/[^/]+\/[^/]+\/actions\/runs(\/[^/]+\/(artifacts|jobs))?([^/]|$)/];
+function normalizePaginatedListResponse(octokit, url, response) {
+  const path = url.replace(octokit.request.endpoint.DEFAULTS.baseUrl, "");
+  const responseNeedsNormalization = REGEX.find(regex => regex.test(path));
+  if (!responseNeedsNormalization) return; // keep the additional properties intact as there is currently no other way
+  // to retrieve the same information.
+
+  const incompleteResults = response.data.incomplete_results;
+  const repositorySelection = response.data.repository_selection;
+  const totalCount = response.data.total_count;
+  delete response.data.incomplete_results;
+  delete response.data.repository_selection;
+  delete response.data.total_count;
+  const namespaceKey = Object.keys(response.data)[0];
+  const data = response.data[namespaceKey];
+  response.data = data;
+
+  if (typeof incompleteResults !== "undefined") {
+    response.data.incomplete_results = incompleteResults;
+  }
+
+  if (typeof repositorySelection !== "undefined") {
+    response.data.repository_selection = repositorySelection;
+  }
+
+  response.data.total_count = totalCount;
+  Object.defineProperty(response.data, namespaceKey, {
+    get() {
+      octokit.log.warn(`[@octokit/paginate-rest] "response.data.${namespaceKey}" is deprecated for "GET ${path}". Get the results directly from "response.data"`);
+      return Array.from(data);
+    }
+
+  });
+}
+
+function iterator(octokit, route, parameters) {
+  const options = octokit.request.endpoint(route, parameters);
+  const method = options.method;
+  const headers = options.headers;
+  let url = options.url;
+  return {
+    [Symbol.asyncIterator]: () => ({
+      next() {
+        if (!url) {
+          return Promise.resolve({
+            done: true
+          });
+        }
+
+        return octokit.request({
+          method,
+          url,
+          headers
+        }).then(response => {
+          normalizePaginatedListResponse(octokit, url, response); // `response.headers.link` format:
+          // '<https://api.github.com/users/aseemk/followers?page=2>; rel="next", <https://api.github.com/users/aseemk/followers?page=2>; rel="last"'
+          // sets `url` to undefined if "next" URL is not present or `link` header is not set
+
+          url = ((response.headers.link || "").match(/<([^>]+)>;\s*rel="next"/) || [])[1];
+          return {
+            value: response
+          };
+        });
+      }
+
+    })
+  };
+}
+
+function paginate(octokit, route, parameters, mapFn) {
+  if (typeof parameters === "function") {
+    mapFn = parameters;
+    parameters = undefined;
+  }
+
+  return gather(octokit, [], iterator(octokit, route, parameters)[Symbol.asyncIterator](), mapFn);
+}
+
+function gather(octokit, results, iterator, mapFn) {
+  return iterator.next().then(result => {
+    if (result.done) {
+      return results;
+    }
+
+    let earlyExit = false;
+
+    function done() {
+      earlyExit = true;
+    }
+
+    results = results.concat(mapFn ? mapFn(result.value, done) : result.value.data);
+
+    if (earlyExit) {
+      return results;
+    }
+
+    return gather(octokit, results, iterator, mapFn);
+  });
+}
+
+/**
+ * @param octokit Octokit instance
+ * @param options Options passed to Octokit constructor
+ */
+
+function paginateRest(octokit) {
+  return {
+    paginate: Object.assign(paginate.bind(null, octokit), {
+      iterator: iterator.bind(null, octokit)
+    })
+  };
+}
+paginateRest.VERSION = VERSION;
+
+exports.paginateRest = paginateRest;
+//# sourceMappingURL=index.js.map
+
+
+/***/ }),
+
 /***/ 18:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = authenticationRequestError;
+
+const { RequestError } = __webpack_require__(552);
+
+function authenticationRequestError(state, error, options) {
+  /* istanbul ignore next */
+  if (!error.headers) throw error;
+
+  const otpRequired = /required/.test(error.headers["x-github-otp"] || "");
+  // handle "2FA required" error only
+  if (error.status !== 401 || !otpRequired) {
+    throw error;
+  }
+
+  if (
+    error.status === 401 &&
+    otpRequired &&
+    error.request &&
+    error.request.headers["x-github-otp"]
+  ) {
+    throw new RequestError(
+      "Invalid one-time password for two-factor authentication",
+      401,
+      {
+        headers: error.headers,
+        request: options
+      }
+    );
+  }
+
+  if (typeof state.auth.on2fa !== "function") {
+    throw new RequestError(
+      "2FA required, but options.on2fa is not a function. See https://github.com/octokit/rest.js#authentication",
+      401,
+      {
+        headers: error.headers,
+        request: options
+      }
+    );
+  }
+
+  return Promise.resolve()
+    .then(() => {
+      return state.auth.on2fa();
+    })
+    .then(oneTimePassword => {
+      const newOptions = Object.assign(options, {
+        headers: Object.assign(
+          { "x-github-otp": oneTimePassword },
+          options.headers
+        )
+      });
+      return state.octokit.request(newOptions);
+    });
+}
+
+
+/***/ }),
+
+/***/ 19:
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
 
-exports.alphasort = alphasort
-exports.alphasorti = alphasorti
-exports.setopts = setopts
-exports.ownProp = ownProp
-exports.makeAbs = makeAbs
-exports.finish = finish
-exports.mark = mark
-exports.isIgnored = isIgnored
-exports.childrenIgnored = childrenIgnored
+"use strict";
 
-function ownProp (obj, field) {
-  return Object.prototype.hasOwnProperty.call(obj, field)
-}
 
-var path = __webpack_require__(277)
-var minimatch = __webpack_require__(689)
-var isAbsolute = __webpack_require__(829)
-var Minimatch = minimatch.Minimatch
+Object.defineProperty(exports, '__esModule', { value: true });
 
-function alphasorti (a, b) {
-  return a.toLowerCase().localeCompare(b.toLowerCase())
-}
+var deprecation = __webpack_require__(593);
 
-function alphasort (a, b) {
-  return a.localeCompare(b)
-}
-
-function setupIgnores (self, options) {
-  self.ignore = options.ignore || []
-
-  if (!Array.isArray(self.ignore))
-    self.ignore = [self.ignore]
-
-  if (self.ignore.length) {
-    self.ignore = self.ignore.map(ignoreMap)
-  }
-}
-
-// ignore patterns are always in dot:true mode.
-function ignoreMap (pattern) {
-  var gmatcher = null
-  if (pattern.slice(-3) === '/**') {
-    var gpattern = pattern.replace(/(\/\*\*)+$/, '')
-    gmatcher = new Minimatch(gpattern, { dot: true })
-  }
-
-  return {
-    matcher: new Minimatch(pattern, { dot: true }),
-    gmatcher: gmatcher
-  }
-}
-
-function setopts (self, pattern, options) {
-  if (!options)
-    options = {}
-
-  // base-matching: just use globstar for that.
-  if (options.matchBase && -1 === pattern.indexOf("/")) {
-    if (options.noglobstar) {
-      throw new Error("base matching requires globstar")
+var endpointsByScope = {
+  actions: {
+    cancelWorkflowRun: {
+      method: "POST",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        run_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/runs/:run_id/cancel"
+    },
+    createOrUpdateSecretForRepo: {
+      method: "PUT",
+      params: {
+        encrypted_value: {
+          type: "string"
+        },
+        key_id: {
+          type: "string"
+        },
+        name: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/secrets/:name"
+    },
+    createRegistrationToken: {
+      method: "POST",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/runners/registration-token"
+    },
+    createRemoveToken: {
+      method: "POST",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/runners/remove-token"
+    },
+    deleteArtifact: {
+      method: "DELETE",
+      params: {
+        artifact_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/artifacts/:artifact_id"
+    },
+    deleteSecretFromRepo: {
+      method: "DELETE",
+      params: {
+        name: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/secrets/:name"
+    },
+    downloadArtifact: {
+      method: "GET",
+      params: {
+        archive_format: {
+          required: true,
+          type: "string"
+        },
+        artifact_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/artifacts/:artifact_id/:archive_format"
+    },
+    getArtifact: {
+      method: "GET",
+      params: {
+        artifact_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/artifacts/:artifact_id"
+    },
+    getPublicKey: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/secrets/public-key"
+    },
+    getSecret: {
+      method: "GET",
+      params: {
+        name: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/secrets/:name"
+    },
+    getSelfHostedRunner: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        runner_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/runners/:runner_id"
+    },
+    getWorkflow: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        workflow_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/workflows/:workflow_id"
+    },
+    getWorkflowJob: {
+      method: "GET",
+      params: {
+        job_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/jobs/:job_id"
+    },
+    getWorkflowRun: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        run_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/runs/:run_id"
+    },
+    listDownloadsForSelfHostedRunnerApplication: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/runners/downloads"
+    },
+    listJobsForWorkflowRun: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        run_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/runs/:run_id/jobs"
+    },
+    listRepoWorkflowRuns: {
+      method: "GET",
+      params: {
+        actor: {
+          type: "string"
+        },
+        branch: {
+          type: "string"
+        },
+        event: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        status: {
+          enum: ["completed", "status", "conclusion"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/runs"
+    },
+    listRepoWorkflows: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/workflows"
+    },
+    listSecretsForRepo: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/secrets"
+    },
+    listSelfHostedRunnersForRepo: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/runners"
+    },
+    listWorkflowJobLogs: {
+      method: "GET",
+      params: {
+        job_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/jobs/:job_id/logs"
+    },
+    listWorkflowRunArtifacts: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        run_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/runs/:run_id/artifacts"
+    },
+    listWorkflowRunLogs: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        run_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/runs/:run_id/logs"
+    },
+    listWorkflowRuns: {
+      method: "GET",
+      params: {
+        actor: {
+          type: "string"
+        },
+        branch: {
+          type: "string"
+        },
+        event: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        status: {
+          enum: ["completed", "status", "conclusion"],
+          type: "string"
+        },
+        workflow_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/workflows/:workflow_id/runs"
+    },
+    reRunWorkflow: {
+      method: "POST",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        run_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/runs/:run_id/rerun"
+    },
+    removeSelfHostedRunner: {
+      method: "DELETE",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        runner_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/actions/runners/:runner_id"
     }
-    pattern = "**/" + pattern
+  },
+  activity: {
+    checkStarringRepo: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/user/starred/:owner/:repo"
+    },
+    deleteRepoSubscription: {
+      method: "DELETE",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/subscription"
+    },
+    deleteThreadSubscription: {
+      method: "DELETE",
+      params: {
+        thread_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/notifications/threads/:thread_id/subscription"
+    },
+    getRepoSubscription: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/subscription"
+    },
+    getThread: {
+      method: "GET",
+      params: {
+        thread_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/notifications/threads/:thread_id"
+    },
+    getThreadSubscription: {
+      method: "GET",
+      params: {
+        thread_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/notifications/threads/:thread_id/subscription"
+    },
+    listEventsForOrg: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/events/orgs/:org"
+    },
+    listEventsForUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/events"
+    },
+    listFeeds: {
+      method: "GET",
+      params: {},
+      url: "/feeds"
+    },
+    listNotifications: {
+      method: "GET",
+      params: {
+        all: {
+          type: "boolean"
+        },
+        before: {
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        participating: {
+          type: "boolean"
+        },
+        per_page: {
+          type: "integer"
+        },
+        since: {
+          type: "string"
+        }
+      },
+      url: "/notifications"
+    },
+    listNotificationsForRepo: {
+      method: "GET",
+      params: {
+        all: {
+          type: "boolean"
+        },
+        before: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        participating: {
+          type: "boolean"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        since: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/notifications"
+    },
+    listPublicEvents: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/events"
+    },
+    listPublicEventsForOrg: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/orgs/:org/events"
+    },
+    listPublicEventsForRepoNetwork: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/networks/:owner/:repo/events"
+    },
+    listPublicEventsForUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/events/public"
+    },
+    listReceivedEventsForUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/received_events"
+    },
+    listReceivedPublicEventsForUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/received_events/public"
+    },
+    listRepoEvents: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/events"
+    },
+    listReposStarredByAuthenticatedUser: {
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        sort: {
+          enum: ["created", "updated"],
+          type: "string"
+        }
+      },
+      url: "/user/starred"
+    },
+    listReposStarredByUser: {
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        sort: {
+          enum: ["created", "updated"],
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/starred"
+    },
+    listReposWatchedByUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/subscriptions"
+    },
+    listStargazersForRepo: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/stargazers"
+    },
+    listWatchedReposForAuthenticatedUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/subscriptions"
+    },
+    listWatchersForRepo: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/subscribers"
+    },
+    markAsRead: {
+      method: "PUT",
+      params: {
+        last_read_at: {
+          type: "string"
+        }
+      },
+      url: "/notifications"
+    },
+    markNotificationsAsReadForRepo: {
+      method: "PUT",
+      params: {
+        last_read_at: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/notifications"
+    },
+    markThreadAsRead: {
+      method: "PATCH",
+      params: {
+        thread_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/notifications/threads/:thread_id"
+    },
+    setRepoSubscription: {
+      method: "PUT",
+      params: {
+        ignored: {
+          type: "boolean"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        subscribed: {
+          type: "boolean"
+        }
+      },
+      url: "/repos/:owner/:repo/subscription"
+    },
+    setThreadSubscription: {
+      method: "PUT",
+      params: {
+        ignored: {
+          type: "boolean"
+        },
+        thread_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/notifications/threads/:thread_id/subscription"
+    },
+    starRepo: {
+      method: "PUT",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/user/starred/:owner/:repo"
+    },
+    unstarRepo: {
+      method: "DELETE",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/user/starred/:owner/:repo"
+    }
+  },
+  apps: {
+    addRepoToInstallation: {
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "PUT",
+      params: {
+        installation_id: {
+          required: true,
+          type: "integer"
+        },
+        repository_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/user/installations/:installation_id/repositories/:repository_id"
+    },
+    checkAccountIsAssociatedWithAny: {
+      method: "GET",
+      params: {
+        account_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/marketplace_listing/accounts/:account_id"
+    },
+    checkAccountIsAssociatedWithAnyStubbed: {
+      method: "GET",
+      params: {
+        account_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/marketplace_listing/stubbed/accounts/:account_id"
+    },
+    checkAuthorization: {
+      deprecated: "octokit.apps.checkAuthorization() is deprecated, see https://developer.github.com/v3/apps/oauth_applications/#check-an-authorization",
+      method: "GET",
+      params: {
+        access_token: {
+          required: true,
+          type: "string"
+        },
+        client_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/applications/:client_id/tokens/:access_token"
+    },
+    checkToken: {
+      headers: {
+        accept: "application/vnd.github.doctor-strange-preview+json"
+      },
+      method: "POST",
+      params: {
+        access_token: {
+          type: "string"
+        },
+        client_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/applications/:client_id/token"
+    },
+    createContentAttachment: {
+      headers: {
+        accept: "application/vnd.github.corsair-preview+json"
+      },
+      method: "POST",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        content_reference_id: {
+          required: true,
+          type: "integer"
+        },
+        title: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/content_references/:content_reference_id/attachments"
+    },
+    createFromManifest: {
+      headers: {
+        accept: "application/vnd.github.fury-preview+json"
+      },
+      method: "POST",
+      params: {
+        code: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/app-manifests/:code/conversions"
+    },
+    createInstallationToken: {
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "POST",
+      params: {
+        installation_id: {
+          required: true,
+          type: "integer"
+        },
+        permissions: {
+          type: "object"
+        },
+        repository_ids: {
+          type: "integer[]"
+        }
+      },
+      url: "/app/installations/:installation_id/access_tokens"
+    },
+    deleteAuthorization: {
+      headers: {
+        accept: "application/vnd.github.doctor-strange-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        access_token: {
+          type: "string"
+        },
+        client_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/applications/:client_id/grant"
+    },
+    deleteInstallation: {
+      headers: {
+        accept: "application/vnd.github.gambit-preview+json,application/vnd.github.machine-man-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        installation_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/app/installations/:installation_id"
+    },
+    deleteToken: {
+      headers: {
+        accept: "application/vnd.github.doctor-strange-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        access_token: {
+          type: "string"
+        },
+        client_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/applications/:client_id/token"
+    },
+    findOrgInstallation: {
+      deprecated: "octokit.apps.findOrgInstallation() has been renamed to octokit.apps.getOrgInstallation() (2019-04-10)",
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/installation"
+    },
+    findRepoInstallation: {
+      deprecated: "octokit.apps.findRepoInstallation() has been renamed to octokit.apps.getRepoInstallation() (2019-04-10)",
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/installation"
+    },
+    findUserInstallation: {
+      deprecated: "octokit.apps.findUserInstallation() has been renamed to octokit.apps.getUserInstallation() (2019-04-10)",
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "GET",
+      params: {
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/installation"
+    },
+    getAuthenticated: {
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "GET",
+      params: {},
+      url: "/app"
+    },
+    getBySlug: {
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "GET",
+      params: {
+        app_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/apps/:app_slug"
+    },
+    getInstallation: {
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "GET",
+      params: {
+        installation_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/app/installations/:installation_id"
+    },
+    getOrgInstallation: {
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/installation"
+    },
+    getRepoInstallation: {
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/installation"
+    },
+    getUserInstallation: {
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "GET",
+      params: {
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/installation"
+    },
+    listAccountsUserOrOrgOnPlan: {
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        plan_id: {
+          required: true,
+          type: "integer"
+        },
+        sort: {
+          enum: ["created", "updated"],
+          type: "string"
+        }
+      },
+      url: "/marketplace_listing/plans/:plan_id/accounts"
+    },
+    listAccountsUserOrOrgOnPlanStubbed: {
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        plan_id: {
+          required: true,
+          type: "integer"
+        },
+        sort: {
+          enum: ["created", "updated"],
+          type: "string"
+        }
+      },
+      url: "/marketplace_listing/stubbed/plans/:plan_id/accounts"
+    },
+    listInstallationReposForAuthenticatedUser: {
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "GET",
+      params: {
+        installation_id: {
+          required: true,
+          type: "integer"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/installations/:installation_id/repositories"
+    },
+    listInstallations: {
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/app/installations"
+    },
+    listInstallationsForAuthenticatedUser: {
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/installations"
+    },
+    listMarketplacePurchasesForAuthenticatedUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/marketplace_purchases"
+    },
+    listMarketplacePurchasesForAuthenticatedUserStubbed: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/marketplace_purchases/stubbed"
+    },
+    listPlans: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/marketplace_listing/plans"
+    },
+    listPlansStubbed: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/marketplace_listing/stubbed/plans"
+    },
+    listRepos: {
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/installation/repositories"
+    },
+    removeRepoFromInstallation: {
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        installation_id: {
+          required: true,
+          type: "integer"
+        },
+        repository_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/user/installations/:installation_id/repositories/:repository_id"
+    },
+    resetAuthorization: {
+      deprecated: "octokit.apps.resetAuthorization() is deprecated, see https://developer.github.com/v3/apps/oauth_applications/#reset-an-authorization",
+      method: "POST",
+      params: {
+        access_token: {
+          required: true,
+          type: "string"
+        },
+        client_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/applications/:client_id/tokens/:access_token"
+    },
+    resetToken: {
+      headers: {
+        accept: "application/vnd.github.doctor-strange-preview+json"
+      },
+      method: "PATCH",
+      params: {
+        access_token: {
+          type: "string"
+        },
+        client_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/applications/:client_id/token"
+    },
+    revokeAuthorizationForApplication: {
+      deprecated: "octokit.apps.revokeAuthorizationForApplication() is deprecated, see https://developer.github.com/v3/apps/oauth_applications/#revoke-an-authorization-for-an-application",
+      method: "DELETE",
+      params: {
+        access_token: {
+          required: true,
+          type: "string"
+        },
+        client_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/applications/:client_id/tokens/:access_token"
+    },
+    revokeGrantForApplication: {
+      deprecated: "octokit.apps.revokeGrantForApplication() is deprecated, see https://developer.github.com/v3/apps/oauth_applications/#revoke-a-grant-for-an-application",
+      method: "DELETE",
+      params: {
+        access_token: {
+          required: true,
+          type: "string"
+        },
+        client_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/applications/:client_id/grants/:access_token"
+    },
+    revokeInstallationToken: {
+      headers: {
+        accept: "application/vnd.github.gambit-preview+json"
+      },
+      method: "DELETE",
+      params: {},
+      url: "/installation/token"
+    }
+  },
+  checks: {
+    create: {
+      headers: {
+        accept: "application/vnd.github.antiope-preview+json"
+      },
+      method: "POST",
+      params: {
+        actions: {
+          type: "object[]"
+        },
+        "actions[].description": {
+          required: true,
+          type: "string"
+        },
+        "actions[].identifier": {
+          required: true,
+          type: "string"
+        },
+        "actions[].label": {
+          required: true,
+          type: "string"
+        },
+        completed_at: {
+          type: "string"
+        },
+        conclusion: {
+          enum: ["success", "failure", "neutral", "cancelled", "timed_out", "action_required"],
+          type: "string"
+        },
+        details_url: {
+          type: "string"
+        },
+        external_id: {
+          type: "string"
+        },
+        head_sha: {
+          required: true,
+          type: "string"
+        },
+        name: {
+          required: true,
+          type: "string"
+        },
+        output: {
+          type: "object"
+        },
+        "output.annotations": {
+          type: "object[]"
+        },
+        "output.annotations[].annotation_level": {
+          enum: ["notice", "warning", "failure"],
+          required: true,
+          type: "string"
+        },
+        "output.annotations[].end_column": {
+          type: "integer"
+        },
+        "output.annotations[].end_line": {
+          required: true,
+          type: "integer"
+        },
+        "output.annotations[].message": {
+          required: true,
+          type: "string"
+        },
+        "output.annotations[].path": {
+          required: true,
+          type: "string"
+        },
+        "output.annotations[].raw_details": {
+          type: "string"
+        },
+        "output.annotations[].start_column": {
+          type: "integer"
+        },
+        "output.annotations[].start_line": {
+          required: true,
+          type: "integer"
+        },
+        "output.annotations[].title": {
+          type: "string"
+        },
+        "output.images": {
+          type: "object[]"
+        },
+        "output.images[].alt": {
+          required: true,
+          type: "string"
+        },
+        "output.images[].caption": {
+          type: "string"
+        },
+        "output.images[].image_url": {
+          required: true,
+          type: "string"
+        },
+        "output.summary": {
+          required: true,
+          type: "string"
+        },
+        "output.text": {
+          type: "string"
+        },
+        "output.title": {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        started_at: {
+          type: "string"
+        },
+        status: {
+          enum: ["queued", "in_progress", "completed"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/check-runs"
+    },
+    createSuite: {
+      headers: {
+        accept: "application/vnd.github.antiope-preview+json"
+      },
+      method: "POST",
+      params: {
+        head_sha: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/check-suites"
+    },
+    get: {
+      headers: {
+        accept: "application/vnd.github.antiope-preview+json"
+      },
+      method: "GET",
+      params: {
+        check_run_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/check-runs/:check_run_id"
+    },
+    getSuite: {
+      headers: {
+        accept: "application/vnd.github.antiope-preview+json"
+      },
+      method: "GET",
+      params: {
+        check_suite_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/check-suites/:check_suite_id"
+    },
+    listAnnotations: {
+      headers: {
+        accept: "application/vnd.github.antiope-preview+json"
+      },
+      method: "GET",
+      params: {
+        check_run_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/check-runs/:check_run_id/annotations"
+    },
+    listForRef: {
+      headers: {
+        accept: "application/vnd.github.antiope-preview+json"
+      },
+      method: "GET",
+      params: {
+        check_name: {
+          type: "string"
+        },
+        filter: {
+          enum: ["latest", "all"],
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        ref: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        status: {
+          enum: ["queued", "in_progress", "completed"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/commits/:ref/check-runs"
+    },
+    listForSuite: {
+      headers: {
+        accept: "application/vnd.github.antiope-preview+json"
+      },
+      method: "GET",
+      params: {
+        check_name: {
+          type: "string"
+        },
+        check_suite_id: {
+          required: true,
+          type: "integer"
+        },
+        filter: {
+          enum: ["latest", "all"],
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        status: {
+          enum: ["queued", "in_progress", "completed"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/check-suites/:check_suite_id/check-runs"
+    },
+    listSuitesForRef: {
+      headers: {
+        accept: "application/vnd.github.antiope-preview+json"
+      },
+      method: "GET",
+      params: {
+        app_id: {
+          type: "integer"
+        },
+        check_name: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        ref: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/commits/:ref/check-suites"
+    },
+    rerequestSuite: {
+      headers: {
+        accept: "application/vnd.github.antiope-preview+json"
+      },
+      method: "POST",
+      params: {
+        check_suite_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/check-suites/:check_suite_id/rerequest"
+    },
+    setSuitesPreferences: {
+      headers: {
+        accept: "application/vnd.github.antiope-preview+json"
+      },
+      method: "PATCH",
+      params: {
+        auto_trigger_checks: {
+          type: "object[]"
+        },
+        "auto_trigger_checks[].app_id": {
+          required: true,
+          type: "integer"
+        },
+        "auto_trigger_checks[].setting": {
+          required: true,
+          type: "boolean"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/check-suites/preferences"
+    },
+    update: {
+      headers: {
+        accept: "application/vnd.github.antiope-preview+json"
+      },
+      method: "PATCH",
+      params: {
+        actions: {
+          type: "object[]"
+        },
+        "actions[].description": {
+          required: true,
+          type: "string"
+        },
+        "actions[].identifier": {
+          required: true,
+          type: "string"
+        },
+        "actions[].label": {
+          required: true,
+          type: "string"
+        },
+        check_run_id: {
+          required: true,
+          type: "integer"
+        },
+        completed_at: {
+          type: "string"
+        },
+        conclusion: {
+          enum: ["success", "failure", "neutral", "cancelled", "timed_out", "action_required"],
+          type: "string"
+        },
+        details_url: {
+          type: "string"
+        },
+        external_id: {
+          type: "string"
+        },
+        name: {
+          type: "string"
+        },
+        output: {
+          type: "object"
+        },
+        "output.annotations": {
+          type: "object[]"
+        },
+        "output.annotations[].annotation_level": {
+          enum: ["notice", "warning", "failure"],
+          required: true,
+          type: "string"
+        },
+        "output.annotations[].end_column": {
+          type: "integer"
+        },
+        "output.annotations[].end_line": {
+          required: true,
+          type: "integer"
+        },
+        "output.annotations[].message": {
+          required: true,
+          type: "string"
+        },
+        "output.annotations[].path": {
+          required: true,
+          type: "string"
+        },
+        "output.annotations[].raw_details": {
+          type: "string"
+        },
+        "output.annotations[].start_column": {
+          type: "integer"
+        },
+        "output.annotations[].start_line": {
+          required: true,
+          type: "integer"
+        },
+        "output.annotations[].title": {
+          type: "string"
+        },
+        "output.images": {
+          type: "object[]"
+        },
+        "output.images[].alt": {
+          required: true,
+          type: "string"
+        },
+        "output.images[].caption": {
+          type: "string"
+        },
+        "output.images[].image_url": {
+          required: true,
+          type: "string"
+        },
+        "output.summary": {
+          required: true,
+          type: "string"
+        },
+        "output.text": {
+          type: "string"
+        },
+        "output.title": {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        started_at: {
+          type: "string"
+        },
+        status: {
+          enum: ["queued", "in_progress", "completed"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/check-runs/:check_run_id"
+    }
+  },
+  codesOfConduct: {
+    getConductCode: {
+      headers: {
+        accept: "application/vnd.github.scarlet-witch-preview+json"
+      },
+      method: "GET",
+      params: {
+        key: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/codes_of_conduct/:key"
+    },
+    getForRepo: {
+      headers: {
+        accept: "application/vnd.github.scarlet-witch-preview+json"
+      },
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/community/code_of_conduct"
+    },
+    listConductCodes: {
+      headers: {
+        accept: "application/vnd.github.scarlet-witch-preview+json"
+      },
+      method: "GET",
+      params: {},
+      url: "/codes_of_conduct"
+    }
+  },
+  emojis: {
+    get: {
+      method: "GET",
+      params: {},
+      url: "/emojis"
+    }
+  },
+  gists: {
+    checkIsStarred: {
+      method: "GET",
+      params: {
+        gist_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/gists/:gist_id/star"
+    },
+    create: {
+      method: "POST",
+      params: {
+        description: {
+          type: "string"
+        },
+        files: {
+          required: true,
+          type: "object"
+        },
+        "files.content": {
+          type: "string"
+        },
+        public: {
+          type: "boolean"
+        }
+      },
+      url: "/gists"
+    },
+    createComment: {
+      method: "POST",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        gist_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/gists/:gist_id/comments"
+    },
+    delete: {
+      method: "DELETE",
+      params: {
+        gist_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/gists/:gist_id"
+    },
+    deleteComment: {
+      method: "DELETE",
+      params: {
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        gist_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/gists/:gist_id/comments/:comment_id"
+    },
+    fork: {
+      method: "POST",
+      params: {
+        gist_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/gists/:gist_id/forks"
+    },
+    get: {
+      method: "GET",
+      params: {
+        gist_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/gists/:gist_id"
+    },
+    getComment: {
+      method: "GET",
+      params: {
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        gist_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/gists/:gist_id/comments/:comment_id"
+    },
+    getRevision: {
+      method: "GET",
+      params: {
+        gist_id: {
+          required: true,
+          type: "string"
+        },
+        sha: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/gists/:gist_id/:sha"
+    },
+    list: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        since: {
+          type: "string"
+        }
+      },
+      url: "/gists"
+    },
+    listComments: {
+      method: "GET",
+      params: {
+        gist_id: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/gists/:gist_id/comments"
+    },
+    listCommits: {
+      method: "GET",
+      params: {
+        gist_id: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/gists/:gist_id/commits"
+    },
+    listForks: {
+      method: "GET",
+      params: {
+        gist_id: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/gists/:gist_id/forks"
+    },
+    listPublic: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        since: {
+          type: "string"
+        }
+      },
+      url: "/gists/public"
+    },
+    listPublicForUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        since: {
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/gists"
+    },
+    listStarred: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        since: {
+          type: "string"
+        }
+      },
+      url: "/gists/starred"
+    },
+    star: {
+      method: "PUT",
+      params: {
+        gist_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/gists/:gist_id/star"
+    },
+    unstar: {
+      method: "DELETE",
+      params: {
+        gist_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/gists/:gist_id/star"
+    },
+    update: {
+      method: "PATCH",
+      params: {
+        description: {
+          type: "string"
+        },
+        files: {
+          type: "object"
+        },
+        "files.content": {
+          type: "string"
+        },
+        "files.filename": {
+          type: "string"
+        },
+        gist_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/gists/:gist_id"
+    },
+    updateComment: {
+      method: "PATCH",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        gist_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/gists/:gist_id/comments/:comment_id"
+    }
+  },
+  git: {
+    createBlob: {
+      method: "POST",
+      params: {
+        content: {
+          required: true,
+          type: "string"
+        },
+        encoding: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/git/blobs"
+    },
+    createCommit: {
+      method: "POST",
+      params: {
+        author: {
+          type: "object"
+        },
+        "author.date": {
+          type: "string"
+        },
+        "author.email": {
+          type: "string"
+        },
+        "author.name": {
+          type: "string"
+        },
+        committer: {
+          type: "object"
+        },
+        "committer.date": {
+          type: "string"
+        },
+        "committer.email": {
+          type: "string"
+        },
+        "committer.name": {
+          type: "string"
+        },
+        message: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        parents: {
+          required: true,
+          type: "string[]"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        signature: {
+          type: "string"
+        },
+        tree: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/git/commits"
+    },
+    createRef: {
+      method: "POST",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        ref: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        sha: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/git/refs"
+    },
+    createTag: {
+      method: "POST",
+      params: {
+        message: {
+          required: true,
+          type: "string"
+        },
+        object: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        tag: {
+          required: true,
+          type: "string"
+        },
+        tagger: {
+          type: "object"
+        },
+        "tagger.date": {
+          type: "string"
+        },
+        "tagger.email": {
+          type: "string"
+        },
+        "tagger.name": {
+          type: "string"
+        },
+        type: {
+          enum: ["commit", "tree", "blob"],
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/git/tags"
+    },
+    createTree: {
+      method: "POST",
+      params: {
+        base_tree: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        tree: {
+          required: true,
+          type: "object[]"
+        },
+        "tree[].content": {
+          type: "string"
+        },
+        "tree[].mode": {
+          enum: ["100644", "100755", "040000", "160000", "120000"],
+          type: "string"
+        },
+        "tree[].path": {
+          type: "string"
+        },
+        "tree[].sha": {
+          allowNull: true,
+          type: "string"
+        },
+        "tree[].type": {
+          enum: ["blob", "tree", "commit"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/git/trees"
+    },
+    deleteRef: {
+      method: "DELETE",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        ref: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/git/refs/:ref"
+    },
+    getBlob: {
+      method: "GET",
+      params: {
+        file_sha: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/git/blobs/:file_sha"
+    },
+    getCommit: {
+      method: "GET",
+      params: {
+        commit_sha: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/git/commits/:commit_sha"
+    },
+    getRef: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        ref: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/git/ref/:ref"
+    },
+    getTag: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        tag_sha: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/git/tags/:tag_sha"
+    },
+    getTree: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        recursive: {
+          enum: ["1"],
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        tree_sha: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/git/trees/:tree_sha"
+    },
+    listMatchingRefs: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        ref: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/git/matching-refs/:ref"
+    },
+    listRefs: {
+      method: "GET",
+      params: {
+        namespace: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/git/refs/:namespace"
+    },
+    updateRef: {
+      method: "PATCH",
+      params: {
+        force: {
+          type: "boolean"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        ref: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        sha: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/git/refs/:ref"
+    }
+  },
+  gitignore: {
+    getTemplate: {
+      method: "GET",
+      params: {
+        name: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/gitignore/templates/:name"
+    },
+    listTemplates: {
+      method: "GET",
+      params: {},
+      url: "/gitignore/templates"
+    }
+  },
+  interactions: {
+    addOrUpdateRestrictionsForOrg: {
+      headers: {
+        accept: "application/vnd.github.sombra-preview+json"
+      },
+      method: "PUT",
+      params: {
+        limit: {
+          enum: ["existing_users", "contributors_only", "collaborators_only"],
+          required: true,
+          type: "string"
+        },
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/interaction-limits"
+    },
+    addOrUpdateRestrictionsForRepo: {
+      headers: {
+        accept: "application/vnd.github.sombra-preview+json"
+      },
+      method: "PUT",
+      params: {
+        limit: {
+          enum: ["existing_users", "contributors_only", "collaborators_only"],
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/interaction-limits"
+    },
+    getRestrictionsForOrg: {
+      headers: {
+        accept: "application/vnd.github.sombra-preview+json"
+      },
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/interaction-limits"
+    },
+    getRestrictionsForRepo: {
+      headers: {
+        accept: "application/vnd.github.sombra-preview+json"
+      },
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/interaction-limits"
+    },
+    removeRestrictionsForOrg: {
+      headers: {
+        accept: "application/vnd.github.sombra-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/interaction-limits"
+    },
+    removeRestrictionsForRepo: {
+      headers: {
+        accept: "application/vnd.github.sombra-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/interaction-limits"
+    }
+  },
+  issues: {
+    addAssignees: {
+      method: "POST",
+      params: {
+        assignees: {
+          type: "string[]"
+        },
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number/assignees"
+    },
+    addLabels: {
+      method: "POST",
+      params: {
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        labels: {
+          required: true,
+          type: "string[]"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number/labels"
+    },
+    checkAssignee: {
+      method: "GET",
+      params: {
+        assignee: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/assignees/:assignee"
+    },
+    create: {
+      method: "POST",
+      params: {
+        assignee: {
+          type: "string"
+        },
+        assignees: {
+          type: "string[]"
+        },
+        body: {
+          type: "string"
+        },
+        labels: {
+          type: "string[]"
+        },
+        milestone: {
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        title: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues"
+    },
+    createComment: {
+      method: "POST",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number/comments"
+    },
+    createLabel: {
+      method: "POST",
+      params: {
+        color: {
+          required: true,
+          type: "string"
+        },
+        description: {
+          type: "string"
+        },
+        name: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/labels"
+    },
+    createMilestone: {
+      method: "POST",
+      params: {
+        description: {
+          type: "string"
+        },
+        due_on: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        state: {
+          enum: ["open", "closed"],
+          type: "string"
+        },
+        title: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/milestones"
+    },
+    deleteComment: {
+      method: "DELETE",
+      params: {
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/comments/:comment_id"
+    },
+    deleteLabel: {
+      method: "DELETE",
+      params: {
+        name: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/labels/:name"
+    },
+    deleteMilestone: {
+      method: "DELETE",
+      params: {
+        milestone_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "milestone_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/milestones/:milestone_number"
+    },
+    get: {
+      method: "GET",
+      params: {
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number"
+    },
+    getComment: {
+      method: "GET",
+      params: {
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/comments/:comment_id"
+    },
+    getEvent: {
+      method: "GET",
+      params: {
+        event_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/events/:event_id"
+    },
+    getLabel: {
+      method: "GET",
+      params: {
+        name: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/labels/:name"
+    },
+    getMilestone: {
+      method: "GET",
+      params: {
+        milestone_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "milestone_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/milestones/:milestone_number"
+    },
+    list: {
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        filter: {
+          enum: ["assigned", "created", "mentioned", "subscribed", "all"],
+          type: "string"
+        },
+        labels: {
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        since: {
+          type: "string"
+        },
+        sort: {
+          enum: ["created", "updated", "comments"],
+          type: "string"
+        },
+        state: {
+          enum: ["open", "closed", "all"],
+          type: "string"
+        }
+      },
+      url: "/issues"
+    },
+    listAssignees: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/assignees"
+    },
+    listComments: {
+      method: "GET",
+      params: {
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        since: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number/comments"
+    },
+    listCommentsForRepo: {
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        since: {
+          type: "string"
+        },
+        sort: {
+          enum: ["created", "updated"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/comments"
+    },
+    listEvents: {
+      method: "GET",
+      params: {
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number/events"
+    },
+    listEventsForRepo: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/events"
+    },
+    listEventsForTimeline: {
+      headers: {
+        accept: "application/vnd.github.mockingbird-preview+json"
+      },
+      method: "GET",
+      params: {
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number/timeline"
+    },
+    listForAuthenticatedUser: {
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        filter: {
+          enum: ["assigned", "created", "mentioned", "subscribed", "all"],
+          type: "string"
+        },
+        labels: {
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        since: {
+          type: "string"
+        },
+        sort: {
+          enum: ["created", "updated", "comments"],
+          type: "string"
+        },
+        state: {
+          enum: ["open", "closed", "all"],
+          type: "string"
+        }
+      },
+      url: "/user/issues"
+    },
+    listForOrg: {
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        filter: {
+          enum: ["assigned", "created", "mentioned", "subscribed", "all"],
+          type: "string"
+        },
+        labels: {
+          type: "string"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        since: {
+          type: "string"
+        },
+        sort: {
+          enum: ["created", "updated", "comments"],
+          type: "string"
+        },
+        state: {
+          enum: ["open", "closed", "all"],
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/issues"
+    },
+    listForRepo: {
+      method: "GET",
+      params: {
+        assignee: {
+          type: "string"
+        },
+        creator: {
+          type: "string"
+        },
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        labels: {
+          type: "string"
+        },
+        mentioned: {
+          type: "string"
+        },
+        milestone: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        since: {
+          type: "string"
+        },
+        sort: {
+          enum: ["created", "updated", "comments"],
+          type: "string"
+        },
+        state: {
+          enum: ["open", "closed", "all"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues"
+    },
+    listLabelsForMilestone: {
+      method: "GET",
+      params: {
+        milestone_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "milestone_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/milestones/:milestone_number/labels"
+    },
+    listLabelsForRepo: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/labels"
+    },
+    listLabelsOnIssue: {
+      method: "GET",
+      params: {
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number/labels"
+    },
+    listMilestonesForRepo: {
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        sort: {
+          enum: ["due_on", "completeness"],
+          type: "string"
+        },
+        state: {
+          enum: ["open", "closed", "all"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/milestones"
+    },
+    lock: {
+      method: "PUT",
+      params: {
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        lock_reason: {
+          enum: ["off-topic", "too heated", "resolved", "spam"],
+          type: "string"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number/lock"
+    },
+    removeAssignees: {
+      method: "DELETE",
+      params: {
+        assignees: {
+          type: "string[]"
+        },
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number/assignees"
+    },
+    removeLabel: {
+      method: "DELETE",
+      params: {
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        name: {
+          required: true,
+          type: "string"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number/labels/:name"
+    },
+    removeLabels: {
+      method: "DELETE",
+      params: {
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number/labels"
+    },
+    replaceLabels: {
+      method: "PUT",
+      params: {
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        labels: {
+          type: "string[]"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number/labels"
+    },
+    unlock: {
+      method: "DELETE",
+      params: {
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number/lock"
+    },
+    update: {
+      method: "PATCH",
+      params: {
+        assignee: {
+          type: "string"
+        },
+        assignees: {
+          type: "string[]"
+        },
+        body: {
+          type: "string"
+        },
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        labels: {
+          type: "string[]"
+        },
+        milestone: {
+          allowNull: true,
+          type: "integer"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        state: {
+          enum: ["open", "closed"],
+          type: "string"
+        },
+        title: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number"
+    },
+    updateComment: {
+      method: "PATCH",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/comments/:comment_id"
+    },
+    updateLabel: {
+      method: "PATCH",
+      params: {
+        color: {
+          type: "string"
+        },
+        current_name: {
+          required: true,
+          type: "string"
+        },
+        description: {
+          type: "string"
+        },
+        name: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/labels/:current_name"
+    },
+    updateMilestone: {
+      method: "PATCH",
+      params: {
+        description: {
+          type: "string"
+        },
+        due_on: {
+          type: "string"
+        },
+        milestone_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "milestone_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        state: {
+          enum: ["open", "closed"],
+          type: "string"
+        },
+        title: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/milestones/:milestone_number"
+    }
+  },
+  licenses: {
+    get: {
+      method: "GET",
+      params: {
+        license: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/licenses/:license"
+    },
+    getForRepo: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/license"
+    },
+    list: {
+      deprecated: "octokit.licenses.list() has been renamed to octokit.licenses.listCommonlyUsed() (2019-03-05)",
+      method: "GET",
+      params: {},
+      url: "/licenses"
+    },
+    listCommonlyUsed: {
+      method: "GET",
+      params: {},
+      url: "/licenses"
+    }
+  },
+  markdown: {
+    render: {
+      method: "POST",
+      params: {
+        context: {
+          type: "string"
+        },
+        mode: {
+          enum: ["markdown", "gfm"],
+          type: "string"
+        },
+        text: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/markdown"
+    },
+    renderRaw: {
+      headers: {
+        "content-type": "text/plain; charset=utf-8"
+      },
+      method: "POST",
+      params: {
+        data: {
+          mapTo: "data",
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/markdown/raw"
+    }
+  },
+  meta: {
+    get: {
+      method: "GET",
+      params: {},
+      url: "/meta"
+    }
+  },
+  migrations: {
+    cancelImport: {
+      method: "DELETE",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/import"
+    },
+    deleteArchiveForAuthenticatedUser: {
+      headers: {
+        accept: "application/vnd.github.wyandotte-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        migration_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/user/migrations/:migration_id/archive"
+    },
+    deleteArchiveForOrg: {
+      headers: {
+        accept: "application/vnd.github.wyandotte-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        migration_id: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/migrations/:migration_id/archive"
+    },
+    downloadArchiveForOrg: {
+      headers: {
+        accept: "application/vnd.github.wyandotte-preview+json"
+      },
+      method: "GET",
+      params: {
+        migration_id: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/migrations/:migration_id/archive"
+    },
+    getArchiveForAuthenticatedUser: {
+      headers: {
+        accept: "application/vnd.github.wyandotte-preview+json"
+      },
+      method: "GET",
+      params: {
+        migration_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/user/migrations/:migration_id/archive"
+    },
+    getArchiveForOrg: {
+      deprecated: "octokit.migrations.getArchiveForOrg() has been renamed to octokit.migrations.downloadArchiveForOrg() (2020-01-27)",
+      headers: {
+        accept: "application/vnd.github.wyandotte-preview+json"
+      },
+      method: "GET",
+      params: {
+        migration_id: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/migrations/:migration_id/archive"
+    },
+    getCommitAuthors: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        since: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/import/authors"
+    },
+    getImportProgress: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/import"
+    },
+    getLargeFiles: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/import/large_files"
+    },
+    getStatusForAuthenticatedUser: {
+      headers: {
+        accept: "application/vnd.github.wyandotte-preview+json"
+      },
+      method: "GET",
+      params: {
+        migration_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/user/migrations/:migration_id"
+    },
+    getStatusForOrg: {
+      headers: {
+        accept: "application/vnd.github.wyandotte-preview+json"
+      },
+      method: "GET",
+      params: {
+        migration_id: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/migrations/:migration_id"
+    },
+    listForAuthenticatedUser: {
+      headers: {
+        accept: "application/vnd.github.wyandotte-preview+json"
+      },
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/migrations"
+    },
+    listForOrg: {
+      headers: {
+        accept: "application/vnd.github.wyandotte-preview+json"
+      },
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/orgs/:org/migrations"
+    },
+    listReposForOrg: {
+      headers: {
+        accept: "application/vnd.github.wyandotte-preview+json"
+      },
+      method: "GET",
+      params: {
+        migration_id: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/orgs/:org/migrations/:migration_id/repositories"
+    },
+    listReposForUser: {
+      headers: {
+        accept: "application/vnd.github.wyandotte-preview+json"
+      },
+      method: "GET",
+      params: {
+        migration_id: {
+          required: true,
+          type: "integer"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/:migration_id/repositories"
+    },
+    mapCommitAuthor: {
+      method: "PATCH",
+      params: {
+        author_id: {
+          required: true,
+          type: "integer"
+        },
+        email: {
+          type: "string"
+        },
+        name: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/import/authors/:author_id"
+    },
+    setLfsPreference: {
+      method: "PATCH",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        use_lfs: {
+          enum: ["opt_in", "opt_out"],
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/import/lfs"
+    },
+    startForAuthenticatedUser: {
+      method: "POST",
+      params: {
+        exclude_attachments: {
+          type: "boolean"
+        },
+        lock_repositories: {
+          type: "boolean"
+        },
+        repositories: {
+          required: true,
+          type: "string[]"
+        }
+      },
+      url: "/user/migrations"
+    },
+    startForOrg: {
+      method: "POST",
+      params: {
+        exclude_attachments: {
+          type: "boolean"
+        },
+        lock_repositories: {
+          type: "boolean"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        repositories: {
+          required: true,
+          type: "string[]"
+        }
+      },
+      url: "/orgs/:org/migrations"
+    },
+    startImport: {
+      method: "PUT",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        tfvc_project: {
+          type: "string"
+        },
+        vcs: {
+          enum: ["subversion", "git", "mercurial", "tfvc"],
+          type: "string"
+        },
+        vcs_password: {
+          type: "string"
+        },
+        vcs_url: {
+          required: true,
+          type: "string"
+        },
+        vcs_username: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/import"
+    },
+    unlockRepoForAuthenticatedUser: {
+      headers: {
+        accept: "application/vnd.github.wyandotte-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        migration_id: {
+          required: true,
+          type: "integer"
+        },
+        repo_name: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/user/migrations/:migration_id/repos/:repo_name/lock"
+    },
+    unlockRepoForOrg: {
+      headers: {
+        accept: "application/vnd.github.wyandotte-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        migration_id: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        repo_name: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/migrations/:migration_id/repos/:repo_name/lock"
+    },
+    updateImport: {
+      method: "PATCH",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        vcs_password: {
+          type: "string"
+        },
+        vcs_username: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/import"
+    }
+  },
+  oauthAuthorizations: {
+    checkAuthorization: {
+      deprecated: "octokit.oauthAuthorizations.checkAuthorization() has been renamed to octokit.apps.checkAuthorization() (2019-11-05)",
+      method: "GET",
+      params: {
+        access_token: {
+          required: true,
+          type: "string"
+        },
+        client_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/applications/:client_id/tokens/:access_token"
+    },
+    createAuthorization: {
+      deprecated: "octokit.oauthAuthorizations.createAuthorization() is deprecated, see https://developer.github.com/v3/oauth_authorizations/#create-a-new-authorization",
+      method: "POST",
+      params: {
+        client_id: {
+          type: "string"
+        },
+        client_secret: {
+          type: "string"
+        },
+        fingerprint: {
+          type: "string"
+        },
+        note: {
+          required: true,
+          type: "string"
+        },
+        note_url: {
+          type: "string"
+        },
+        scopes: {
+          type: "string[]"
+        }
+      },
+      url: "/authorizations"
+    },
+    deleteAuthorization: {
+      deprecated: "octokit.oauthAuthorizations.deleteAuthorization() is deprecated, see https://developer.github.com/v3/oauth_authorizations/#delete-an-authorization",
+      method: "DELETE",
+      params: {
+        authorization_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/authorizations/:authorization_id"
+    },
+    deleteGrant: {
+      deprecated: "octokit.oauthAuthorizations.deleteGrant() is deprecated, see https://developer.github.com/v3/oauth_authorizations/#delete-a-grant",
+      method: "DELETE",
+      params: {
+        grant_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/applications/grants/:grant_id"
+    },
+    getAuthorization: {
+      deprecated: "octokit.oauthAuthorizations.getAuthorization() is deprecated, see https://developer.github.com/v3/oauth_authorizations/#get-a-single-authorization",
+      method: "GET",
+      params: {
+        authorization_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/authorizations/:authorization_id"
+    },
+    getGrant: {
+      deprecated: "octokit.oauthAuthorizations.getGrant() is deprecated, see https://developer.github.com/v3/oauth_authorizations/#get-a-single-grant",
+      method: "GET",
+      params: {
+        grant_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/applications/grants/:grant_id"
+    },
+    getOrCreateAuthorizationForApp: {
+      deprecated: "octokit.oauthAuthorizations.getOrCreateAuthorizationForApp() is deprecated, see https://developer.github.com/v3/oauth_authorizations/#get-or-create-an-authorization-for-a-specific-app",
+      method: "PUT",
+      params: {
+        client_id: {
+          required: true,
+          type: "string"
+        },
+        client_secret: {
+          required: true,
+          type: "string"
+        },
+        fingerprint: {
+          type: "string"
+        },
+        note: {
+          type: "string"
+        },
+        note_url: {
+          type: "string"
+        },
+        scopes: {
+          type: "string[]"
+        }
+      },
+      url: "/authorizations/clients/:client_id"
+    },
+    getOrCreateAuthorizationForAppAndFingerprint: {
+      deprecated: "octokit.oauthAuthorizations.getOrCreateAuthorizationForAppAndFingerprint() is deprecated, see https://developer.github.com/v3/oauth_authorizations/#get-or-create-an-authorization-for-a-specific-app-and-fingerprint",
+      method: "PUT",
+      params: {
+        client_id: {
+          required: true,
+          type: "string"
+        },
+        client_secret: {
+          required: true,
+          type: "string"
+        },
+        fingerprint: {
+          required: true,
+          type: "string"
+        },
+        note: {
+          type: "string"
+        },
+        note_url: {
+          type: "string"
+        },
+        scopes: {
+          type: "string[]"
+        }
+      },
+      url: "/authorizations/clients/:client_id/:fingerprint"
+    },
+    getOrCreateAuthorizationForAppFingerprint: {
+      deprecated: "octokit.oauthAuthorizations.getOrCreateAuthorizationForAppFingerprint() has been renamed to octokit.oauthAuthorizations.getOrCreateAuthorizationForAppAndFingerprint() (2018-12-27)",
+      method: "PUT",
+      params: {
+        client_id: {
+          required: true,
+          type: "string"
+        },
+        client_secret: {
+          required: true,
+          type: "string"
+        },
+        fingerprint: {
+          required: true,
+          type: "string"
+        },
+        note: {
+          type: "string"
+        },
+        note_url: {
+          type: "string"
+        },
+        scopes: {
+          type: "string[]"
+        }
+      },
+      url: "/authorizations/clients/:client_id/:fingerprint"
+    },
+    listAuthorizations: {
+      deprecated: "octokit.oauthAuthorizations.listAuthorizations() is deprecated, see https://developer.github.com/v3/oauth_authorizations/#list-your-authorizations",
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/authorizations"
+    },
+    listGrants: {
+      deprecated: "octokit.oauthAuthorizations.listGrants() is deprecated, see https://developer.github.com/v3/oauth_authorizations/#list-your-grants",
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/applications/grants"
+    },
+    resetAuthorization: {
+      deprecated: "octokit.oauthAuthorizations.resetAuthorization() has been renamed to octokit.apps.resetAuthorization() (2019-11-05)",
+      method: "POST",
+      params: {
+        access_token: {
+          required: true,
+          type: "string"
+        },
+        client_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/applications/:client_id/tokens/:access_token"
+    },
+    revokeAuthorizationForApplication: {
+      deprecated: "octokit.oauthAuthorizations.revokeAuthorizationForApplication() has been renamed to octokit.apps.revokeAuthorizationForApplication() (2019-11-05)",
+      method: "DELETE",
+      params: {
+        access_token: {
+          required: true,
+          type: "string"
+        },
+        client_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/applications/:client_id/tokens/:access_token"
+    },
+    revokeGrantForApplication: {
+      deprecated: "octokit.oauthAuthorizations.revokeGrantForApplication() has been renamed to octokit.apps.revokeGrantForApplication() (2019-11-05)",
+      method: "DELETE",
+      params: {
+        access_token: {
+          required: true,
+          type: "string"
+        },
+        client_id: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/applications/:client_id/grants/:access_token"
+    },
+    updateAuthorization: {
+      deprecated: "octokit.oauthAuthorizations.updateAuthorization() is deprecated, see https://developer.github.com/v3/oauth_authorizations/#update-an-existing-authorization",
+      method: "PATCH",
+      params: {
+        add_scopes: {
+          type: "string[]"
+        },
+        authorization_id: {
+          required: true,
+          type: "integer"
+        },
+        fingerprint: {
+          type: "string"
+        },
+        note: {
+          type: "string"
+        },
+        note_url: {
+          type: "string"
+        },
+        remove_scopes: {
+          type: "string[]"
+        },
+        scopes: {
+          type: "string[]"
+        }
+      },
+      url: "/authorizations/:authorization_id"
+    }
+  },
+  orgs: {
+    addOrUpdateMembership: {
+      method: "PUT",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        role: {
+          enum: ["admin", "member"],
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/memberships/:username"
+    },
+    blockUser: {
+      method: "PUT",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/blocks/:username"
+    },
+    checkBlockedUser: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/blocks/:username"
+    },
+    checkMembership: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/members/:username"
+    },
+    checkPublicMembership: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/public_members/:username"
+    },
+    concealMembership: {
+      method: "DELETE",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/public_members/:username"
+    },
+    convertMemberToOutsideCollaborator: {
+      method: "PUT",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/outside_collaborators/:username"
+    },
+    createHook: {
+      method: "POST",
+      params: {
+        active: {
+          type: "boolean"
+        },
+        config: {
+          required: true,
+          type: "object"
+        },
+        "config.content_type": {
+          type: "string"
+        },
+        "config.insecure_ssl": {
+          type: "string"
+        },
+        "config.secret": {
+          type: "string"
+        },
+        "config.url": {
+          required: true,
+          type: "string"
+        },
+        events: {
+          type: "string[]"
+        },
+        name: {
+          required: true,
+          type: "string"
+        },
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/hooks"
+    },
+    createInvitation: {
+      method: "POST",
+      params: {
+        email: {
+          type: "string"
+        },
+        invitee_id: {
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        role: {
+          enum: ["admin", "direct_member", "billing_manager"],
+          type: "string"
+        },
+        team_ids: {
+          type: "integer[]"
+        }
+      },
+      url: "/orgs/:org/invitations"
+    },
+    deleteHook: {
+      method: "DELETE",
+      params: {
+        hook_id: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/hooks/:hook_id"
+    },
+    get: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org"
+    },
+    getHook: {
+      method: "GET",
+      params: {
+        hook_id: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/hooks/:hook_id"
+    },
+    getMembership: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/memberships/:username"
+    },
+    getMembershipForAuthenticatedUser: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/user/memberships/orgs/:org"
+    },
+    list: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        since: {
+          type: "integer"
+        }
+      },
+      url: "/organizations"
+    },
+    listBlockedUsers: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/blocks"
+    },
+    listForAuthenticatedUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/orgs"
+    },
+    listForUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/orgs"
+    },
+    listHooks: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/orgs/:org/hooks"
+    },
+    listInstallations: {
+      headers: {
+        accept: "application/vnd.github.machine-man-preview+json"
+      },
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/orgs/:org/installations"
+    },
+    listInvitationTeams: {
+      method: "GET",
+      params: {
+        invitation_id: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/orgs/:org/invitations/:invitation_id/teams"
+    },
+    listMembers: {
+      method: "GET",
+      params: {
+        filter: {
+          enum: ["2fa_disabled", "all"],
+          type: "string"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        role: {
+          enum: ["all", "admin", "member"],
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/members"
+    },
+    listMemberships: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        state: {
+          enum: ["active", "pending"],
+          type: "string"
+        }
+      },
+      url: "/user/memberships/orgs"
+    },
+    listOutsideCollaborators: {
+      method: "GET",
+      params: {
+        filter: {
+          enum: ["2fa_disabled", "all"],
+          type: "string"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/orgs/:org/outside_collaborators"
+    },
+    listPendingInvitations: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/orgs/:org/invitations"
+    },
+    listPublicMembers: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/orgs/:org/public_members"
+    },
+    pingHook: {
+      method: "POST",
+      params: {
+        hook_id: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/hooks/:hook_id/pings"
+    },
+    publicizeMembership: {
+      method: "PUT",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/public_members/:username"
+    },
+    removeMember: {
+      method: "DELETE",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/members/:username"
+    },
+    removeMembership: {
+      method: "DELETE",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/memberships/:username"
+    },
+    removeOutsideCollaborator: {
+      method: "DELETE",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/outside_collaborators/:username"
+    },
+    unblockUser: {
+      method: "DELETE",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/blocks/:username"
+    },
+    update: {
+      method: "PATCH",
+      params: {
+        billing_email: {
+          type: "string"
+        },
+        company: {
+          type: "string"
+        },
+        default_repository_permission: {
+          enum: ["read", "write", "admin", "none"],
+          type: "string"
+        },
+        description: {
+          type: "string"
+        },
+        email: {
+          type: "string"
+        },
+        has_organization_projects: {
+          type: "boolean"
+        },
+        has_repository_projects: {
+          type: "boolean"
+        },
+        location: {
+          type: "string"
+        },
+        members_allowed_repository_creation_type: {
+          enum: ["all", "private", "none"],
+          type: "string"
+        },
+        members_can_create_internal_repositories: {
+          type: "boolean"
+        },
+        members_can_create_private_repositories: {
+          type: "boolean"
+        },
+        members_can_create_public_repositories: {
+          type: "boolean"
+        },
+        members_can_create_repositories: {
+          type: "boolean"
+        },
+        name: {
+          type: "string"
+        },
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org"
+    },
+    updateHook: {
+      method: "PATCH",
+      params: {
+        active: {
+          type: "boolean"
+        },
+        config: {
+          type: "object"
+        },
+        "config.content_type": {
+          type: "string"
+        },
+        "config.insecure_ssl": {
+          type: "string"
+        },
+        "config.secret": {
+          type: "string"
+        },
+        "config.url": {
+          required: true,
+          type: "string"
+        },
+        events: {
+          type: "string[]"
+        },
+        hook_id: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/hooks/:hook_id"
+    },
+    updateMembership: {
+      method: "PATCH",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        state: {
+          enum: ["active"],
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/user/memberships/orgs/:org"
+    }
+  },
+  projects: {
+    addCollaborator: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "PUT",
+      params: {
+        permission: {
+          enum: ["read", "write", "admin"],
+          type: "string"
+        },
+        project_id: {
+          required: true,
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/projects/:project_id/collaborators/:username"
+    },
+    createCard: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "POST",
+      params: {
+        column_id: {
+          required: true,
+          type: "integer"
+        },
+        content_id: {
+          type: "integer"
+        },
+        content_type: {
+          type: "string"
+        },
+        note: {
+          type: "string"
+        }
+      },
+      url: "/projects/columns/:column_id/cards"
+    },
+    createColumn: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "POST",
+      params: {
+        name: {
+          required: true,
+          type: "string"
+        },
+        project_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/projects/:project_id/columns"
+    },
+    createForAuthenticatedUser: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "POST",
+      params: {
+        body: {
+          type: "string"
+        },
+        name: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/user/projects"
+    },
+    createForOrg: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "POST",
+      params: {
+        body: {
+          type: "string"
+        },
+        name: {
+          required: true,
+          type: "string"
+        },
+        org: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/projects"
+    },
+    createForRepo: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "POST",
+      params: {
+        body: {
+          type: "string"
+        },
+        name: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/projects"
+    },
+    delete: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        project_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/projects/:project_id"
+    },
+    deleteCard: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        card_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/projects/columns/cards/:card_id"
+    },
+    deleteColumn: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        column_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/projects/columns/:column_id"
+    },
+    get: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        project_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/projects/:project_id"
+    },
+    getCard: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        card_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/projects/columns/cards/:card_id"
+    },
+    getColumn: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        column_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/projects/columns/:column_id"
+    },
+    listCards: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        archived_state: {
+          enum: ["all", "archived", "not_archived"],
+          type: "string"
+        },
+        column_id: {
+          required: true,
+          type: "integer"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/projects/columns/:column_id/cards"
+    },
+    listCollaborators: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        affiliation: {
+          enum: ["outside", "direct", "all"],
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        project_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/projects/:project_id/collaborators"
+    },
+    listColumns: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        project_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/projects/:project_id/columns"
+    },
+    listForOrg: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        state: {
+          enum: ["open", "closed", "all"],
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/projects"
+    },
+    listForRepo: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        state: {
+          enum: ["open", "closed", "all"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/projects"
+    },
+    listForUser: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        state: {
+          enum: ["open", "closed", "all"],
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/projects"
+    },
+    moveCard: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "POST",
+      params: {
+        card_id: {
+          required: true,
+          type: "integer"
+        },
+        column_id: {
+          type: "integer"
+        },
+        position: {
+          required: true,
+          type: "string",
+          validation: "^(top|bottom|after:\\d+)$"
+        }
+      },
+      url: "/projects/columns/cards/:card_id/moves"
+    },
+    moveColumn: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "POST",
+      params: {
+        column_id: {
+          required: true,
+          type: "integer"
+        },
+        position: {
+          required: true,
+          type: "string",
+          validation: "^(first|last|after:\\d+)$"
+        }
+      },
+      url: "/projects/columns/:column_id/moves"
+    },
+    removeCollaborator: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        project_id: {
+          required: true,
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/projects/:project_id/collaborators/:username"
+    },
+    reviewUserPermissionLevel: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        project_id: {
+          required: true,
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/projects/:project_id/collaborators/:username/permission"
+    },
+    update: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "PATCH",
+      params: {
+        body: {
+          type: "string"
+        },
+        name: {
+          type: "string"
+        },
+        organization_permission: {
+          type: "string"
+        },
+        private: {
+          type: "boolean"
+        },
+        project_id: {
+          required: true,
+          type: "integer"
+        },
+        state: {
+          enum: ["open", "closed"],
+          type: "string"
+        }
+      },
+      url: "/projects/:project_id"
+    },
+    updateCard: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "PATCH",
+      params: {
+        archived: {
+          type: "boolean"
+        },
+        card_id: {
+          required: true,
+          type: "integer"
+        },
+        note: {
+          type: "string"
+        }
+      },
+      url: "/projects/columns/cards/:card_id"
+    },
+    updateColumn: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "PATCH",
+      params: {
+        column_id: {
+          required: true,
+          type: "integer"
+        },
+        name: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/projects/columns/:column_id"
+    }
+  },
+  pulls: {
+    checkIfMerged: {
+      method: "GET",
+      params: {
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/merge"
+    },
+    create: {
+      method: "POST",
+      params: {
+        base: {
+          required: true,
+          type: "string"
+        },
+        body: {
+          type: "string"
+        },
+        draft: {
+          type: "boolean"
+        },
+        head: {
+          required: true,
+          type: "string"
+        },
+        maintainer_can_modify: {
+          type: "boolean"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        title: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls"
+    },
+    createComment: {
+      method: "POST",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        commit_id: {
+          required: true,
+          type: "string"
+        },
+        in_reply_to: {
+          deprecated: true,
+          description: "The comment ID to reply to. **Note**: This must be the ID of a top-level comment, not a reply to that comment. Replies to replies are not supported.",
+          type: "integer"
+        },
+        line: {
+          type: "integer"
+        },
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        path: {
+          required: true,
+          type: "string"
+        },
+        position: {
+          type: "integer"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        side: {
+          enum: ["LEFT", "RIGHT"],
+          type: "string"
+        },
+        start_line: {
+          type: "integer"
+        },
+        start_side: {
+          enum: ["LEFT", "RIGHT", "side"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/comments"
+    },
+    createCommentReply: {
+      deprecated: "octokit.pulls.createCommentReply() has been renamed to octokit.pulls.createComment() (2019-09-09)",
+      method: "POST",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        commit_id: {
+          required: true,
+          type: "string"
+        },
+        in_reply_to: {
+          deprecated: true,
+          description: "The comment ID to reply to. **Note**: This must be the ID of a top-level comment, not a reply to that comment. Replies to replies are not supported.",
+          type: "integer"
+        },
+        line: {
+          type: "integer"
+        },
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        path: {
+          required: true,
+          type: "string"
+        },
+        position: {
+          type: "integer"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        side: {
+          enum: ["LEFT", "RIGHT"],
+          type: "string"
+        },
+        start_line: {
+          type: "integer"
+        },
+        start_side: {
+          enum: ["LEFT", "RIGHT", "side"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/comments"
+    },
+    createFromIssue: {
+      deprecated: "octokit.pulls.createFromIssue() is deprecated, see https://developer.github.com/v3/pulls/#create-a-pull-request",
+      method: "POST",
+      params: {
+        base: {
+          required: true,
+          type: "string"
+        },
+        draft: {
+          type: "boolean"
+        },
+        head: {
+          required: true,
+          type: "string"
+        },
+        issue: {
+          required: true,
+          type: "integer"
+        },
+        maintainer_can_modify: {
+          type: "boolean"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls"
+    },
+    createReview: {
+      method: "POST",
+      params: {
+        body: {
+          type: "string"
+        },
+        comments: {
+          type: "object[]"
+        },
+        "comments[].body": {
+          required: true,
+          type: "string"
+        },
+        "comments[].path": {
+          required: true,
+          type: "string"
+        },
+        "comments[].position": {
+          required: true,
+          type: "integer"
+        },
+        commit_id: {
+          type: "string"
+        },
+        event: {
+          enum: ["APPROVE", "REQUEST_CHANGES", "COMMENT"],
+          type: "string"
+        },
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/reviews"
+    },
+    createReviewCommentReply: {
+      method: "POST",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/comments/:comment_id/replies"
+    },
+    createReviewRequest: {
+      method: "POST",
+      params: {
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        reviewers: {
+          type: "string[]"
+        },
+        team_reviewers: {
+          type: "string[]"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/requested_reviewers"
+    },
+    deleteComment: {
+      method: "DELETE",
+      params: {
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/comments/:comment_id"
+    },
+    deletePendingReview: {
+      method: "DELETE",
+      params: {
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        review_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/reviews/:review_id"
+    },
+    deleteReviewRequest: {
+      method: "DELETE",
+      params: {
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        reviewers: {
+          type: "string[]"
+        },
+        team_reviewers: {
+          type: "string[]"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/requested_reviewers"
+    },
+    dismissReview: {
+      method: "PUT",
+      params: {
+        message: {
+          required: true,
+          type: "string"
+        },
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        review_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/reviews/:review_id/dismissals"
+    },
+    get: {
+      method: "GET",
+      params: {
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number"
+    },
+    getComment: {
+      method: "GET",
+      params: {
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/comments/:comment_id"
+    },
+    getCommentsForReview: {
+      method: "GET",
+      params: {
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        review_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/reviews/:review_id/comments"
+    },
+    getReview: {
+      method: "GET",
+      params: {
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        review_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/reviews/:review_id"
+    },
+    list: {
+      method: "GET",
+      params: {
+        base: {
+          type: "string"
+        },
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        head: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        sort: {
+          enum: ["created", "updated", "popularity", "long-running"],
+          type: "string"
+        },
+        state: {
+          enum: ["open", "closed", "all"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls"
+    },
+    listComments: {
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        since: {
+          type: "string"
+        },
+        sort: {
+          enum: ["created", "updated"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/comments"
+    },
+    listCommentsForRepo: {
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        since: {
+          type: "string"
+        },
+        sort: {
+          enum: ["created", "updated"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/comments"
+    },
+    listCommits: {
+      method: "GET",
+      params: {
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/commits"
+    },
+    listFiles: {
+      method: "GET",
+      params: {
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/files"
+    },
+    listReviewRequests: {
+      method: "GET",
+      params: {
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/requested_reviewers"
+    },
+    listReviews: {
+      method: "GET",
+      params: {
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/reviews"
+    },
+    merge: {
+      method: "PUT",
+      params: {
+        commit_message: {
+          type: "string"
+        },
+        commit_title: {
+          type: "string"
+        },
+        merge_method: {
+          enum: ["merge", "squash", "rebase"],
+          type: "string"
+        },
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        sha: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/merge"
+    },
+    submitReview: {
+      method: "POST",
+      params: {
+        body: {
+          type: "string"
+        },
+        event: {
+          enum: ["APPROVE", "REQUEST_CHANGES", "COMMENT"],
+          required: true,
+          type: "string"
+        },
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        review_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/reviews/:review_id/events"
+    },
+    update: {
+      method: "PATCH",
+      params: {
+        base: {
+          type: "string"
+        },
+        body: {
+          type: "string"
+        },
+        maintainer_can_modify: {
+          type: "boolean"
+        },
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        state: {
+          enum: ["open", "closed"],
+          type: "string"
+        },
+        title: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number"
+    },
+    updateBranch: {
+      headers: {
+        accept: "application/vnd.github.lydian-preview+json"
+      },
+      method: "PUT",
+      params: {
+        expected_head_sha: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/update-branch"
+    },
+    updateComment: {
+      method: "PATCH",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/comments/:comment_id"
+    },
+    updateReview: {
+      method: "PUT",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        number: {
+          alias: "pull_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        pull_number: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        review_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/:pull_number/reviews/:review_id"
+    }
+  },
+  rateLimit: {
+    get: {
+      method: "GET",
+      params: {},
+      url: "/rate_limit"
+    }
+  },
+  reactions: {
+    createForCommitComment: {
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "POST",
+      params: {
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/comments/:comment_id/reactions"
+    },
+    createForIssue: {
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "POST",
+      params: {
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          required: true,
+          type: "string"
+        },
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number/reactions"
+    },
+    createForIssueComment: {
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "POST",
+      params: {
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/comments/:comment_id/reactions"
+    },
+    createForPullRequestReviewComment: {
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "POST",
+      params: {
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/comments/:comment_id/reactions"
+    },
+    createForTeamDiscussion: {
+      deprecated: "octokit.reactions.createForTeamDiscussion() has been renamed to octokit.reactions.createForTeamDiscussionLegacy() (2020-01-16)",
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "POST",
+      params: {
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          required: true,
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/reactions"
+    },
+    createForTeamDiscussionComment: {
+      deprecated: "octokit.reactions.createForTeamDiscussionComment() has been renamed to octokit.reactions.createForTeamDiscussionCommentLegacy() (2020-01-16)",
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "POST",
+      params: {
+        comment_number: {
+          required: true,
+          type: "integer"
+        },
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          required: true,
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/comments/:comment_number/reactions"
+    },
+    createForTeamDiscussionCommentInOrg: {
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "POST",
+      params: {
+        comment_number: {
+          required: true,
+          type: "integer"
+        },
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          required: true,
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/discussions/:discussion_number/comments/:comment_number/reactions"
+    },
+    createForTeamDiscussionCommentLegacy: {
+      deprecated: "octokit.reactions.createForTeamDiscussionCommentLegacy() is deprecated, see https://developer.github.com/v3/reactions/#create-reaction-for-a-team-discussion-comment-legacy",
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "POST",
+      params: {
+        comment_number: {
+          required: true,
+          type: "integer"
+        },
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          required: true,
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/comments/:comment_number/reactions"
+    },
+    createForTeamDiscussionInOrg: {
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "POST",
+      params: {
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          required: true,
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/discussions/:discussion_number/reactions"
+    },
+    createForTeamDiscussionLegacy: {
+      deprecated: "octokit.reactions.createForTeamDiscussionLegacy() is deprecated, see https://developer.github.com/v3/reactions/#create-reaction-for-a-team-discussion-legacy",
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "POST",
+      params: {
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          required: true,
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/reactions"
+    },
+    delete: {
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        reaction_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/reactions/:reaction_id"
+    },
+    listForCommitComment: {
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "GET",
+      params: {
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/comments/:comment_id/reactions"
+    },
+    listForIssue: {
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "GET",
+      params: {
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          type: "string"
+        },
+        issue_number: {
+          required: true,
+          type: "integer"
+        },
+        number: {
+          alias: "issue_number",
+          deprecated: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/:issue_number/reactions"
+    },
+    listForIssueComment: {
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "GET",
+      params: {
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/issues/comments/:comment_id/reactions"
+    },
+    listForPullRequestReviewComment: {
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "GET",
+      params: {
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pulls/comments/:comment_id/reactions"
+    },
+    listForTeamDiscussion: {
+      deprecated: "octokit.reactions.listForTeamDiscussion() has been renamed to octokit.reactions.listForTeamDiscussionLegacy() (2020-01-16)",
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "GET",
+      params: {
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/reactions"
+    },
+    listForTeamDiscussionComment: {
+      deprecated: "octokit.reactions.listForTeamDiscussionComment() has been renamed to octokit.reactions.listForTeamDiscussionCommentLegacy() (2020-01-16)",
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "GET",
+      params: {
+        comment_number: {
+          required: true,
+          type: "integer"
+        },
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/comments/:comment_number/reactions"
+    },
+    listForTeamDiscussionCommentInOrg: {
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "GET",
+      params: {
+        comment_number: {
+          required: true,
+          type: "integer"
+        },
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/discussions/:discussion_number/comments/:comment_number/reactions"
+    },
+    listForTeamDiscussionCommentLegacy: {
+      deprecated: "octokit.reactions.listForTeamDiscussionCommentLegacy() is deprecated, see https://developer.github.com/v3/reactions/#list-reactions-for-a-team-discussion-comment-legacy",
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "GET",
+      params: {
+        comment_number: {
+          required: true,
+          type: "integer"
+        },
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/comments/:comment_number/reactions"
+    },
+    listForTeamDiscussionInOrg: {
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "GET",
+      params: {
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/discussions/:discussion_number/reactions"
+    },
+    listForTeamDiscussionLegacy: {
+      deprecated: "octokit.reactions.listForTeamDiscussionLegacy() is deprecated, see https://developer.github.com/v3/reactions/#list-reactions-for-a-team-discussion-legacy",
+      headers: {
+        accept: "application/vnd.github.squirrel-girl-preview+json"
+      },
+      method: "GET",
+      params: {
+        content: {
+          enum: ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"],
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/reactions"
+    }
+  },
+  repos: {
+    acceptInvitation: {
+      method: "PATCH",
+      params: {
+        invitation_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/user/repository_invitations/:invitation_id"
+    },
+    addCollaborator: {
+      method: "PUT",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        permission: {
+          enum: ["pull", "push", "admin"],
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/collaborators/:username"
+    },
+    addDeployKey: {
+      method: "POST",
+      params: {
+        key: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        read_only: {
+          type: "boolean"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        title: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/keys"
+    },
+    addProtectedBranchAdminEnforcement: {
+      method: "POST",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/enforce_admins"
+    },
+    addProtectedBranchAppRestrictions: {
+      method: "POST",
+      params: {
+        apps: {
+          mapTo: "data",
+          required: true,
+          type: "string[]"
+        },
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/apps"
+    },
+    addProtectedBranchRequiredSignatures: {
+      headers: {
+        accept: "application/vnd.github.zzzax-preview+json"
+      },
+      method: "POST",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/required_signatures"
+    },
+    addProtectedBranchRequiredStatusChecksContexts: {
+      method: "POST",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        contexts: {
+          mapTo: "data",
+          required: true,
+          type: "string[]"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/required_status_checks/contexts"
+    },
+    addProtectedBranchTeamRestrictions: {
+      method: "POST",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        teams: {
+          mapTo: "data",
+          required: true,
+          type: "string[]"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/teams"
+    },
+    addProtectedBranchUserRestrictions: {
+      method: "POST",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        users: {
+          mapTo: "data",
+          required: true,
+          type: "string[]"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/users"
+    },
+    checkCollaborator: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/collaborators/:username"
+    },
+    checkVulnerabilityAlerts: {
+      headers: {
+        accept: "application/vnd.github.dorian-preview+json"
+      },
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/vulnerability-alerts"
+    },
+    compareCommits: {
+      method: "GET",
+      params: {
+        base: {
+          required: true,
+          type: "string"
+        },
+        head: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/compare/:base...:head"
+    },
+    createCommitComment: {
+      method: "POST",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        commit_sha: {
+          required: true,
+          type: "string"
+        },
+        line: {
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        path: {
+          type: "string"
+        },
+        position: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        sha: {
+          alias: "commit_sha",
+          deprecated: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/commits/:commit_sha/comments"
+    },
+    createDeployment: {
+      method: "POST",
+      params: {
+        auto_merge: {
+          type: "boolean"
+        },
+        description: {
+          type: "string"
+        },
+        environment: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        payload: {
+          type: "string"
+        },
+        production_environment: {
+          type: "boolean"
+        },
+        ref: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        required_contexts: {
+          type: "string[]"
+        },
+        task: {
+          type: "string"
+        },
+        transient_environment: {
+          type: "boolean"
+        }
+      },
+      url: "/repos/:owner/:repo/deployments"
+    },
+    createDeploymentStatus: {
+      method: "POST",
+      params: {
+        auto_inactive: {
+          type: "boolean"
+        },
+        deployment_id: {
+          required: true,
+          type: "integer"
+        },
+        description: {
+          type: "string"
+        },
+        environment: {
+          enum: ["production", "staging", "qa"],
+          type: "string"
+        },
+        environment_url: {
+          type: "string"
+        },
+        log_url: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        state: {
+          enum: ["error", "failure", "inactive", "in_progress", "queued", "pending", "success"],
+          required: true,
+          type: "string"
+        },
+        target_url: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/deployments/:deployment_id/statuses"
+    },
+    createDispatchEvent: {
+      method: "POST",
+      params: {
+        client_payload: {
+          type: "object"
+        },
+        event_type: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/dispatches"
+    },
+    createFile: {
+      deprecated: "octokit.repos.createFile() has been renamed to octokit.repos.createOrUpdateFile() (2019-06-07)",
+      method: "PUT",
+      params: {
+        author: {
+          type: "object"
+        },
+        "author.email": {
+          required: true,
+          type: "string"
+        },
+        "author.name": {
+          required: true,
+          type: "string"
+        },
+        branch: {
+          type: "string"
+        },
+        committer: {
+          type: "object"
+        },
+        "committer.email": {
+          required: true,
+          type: "string"
+        },
+        "committer.name": {
+          required: true,
+          type: "string"
+        },
+        content: {
+          required: true,
+          type: "string"
+        },
+        message: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        path: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        sha: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/contents/:path"
+    },
+    createForAuthenticatedUser: {
+      method: "POST",
+      params: {
+        allow_merge_commit: {
+          type: "boolean"
+        },
+        allow_rebase_merge: {
+          type: "boolean"
+        },
+        allow_squash_merge: {
+          type: "boolean"
+        },
+        auto_init: {
+          type: "boolean"
+        },
+        delete_branch_on_merge: {
+          type: "boolean"
+        },
+        description: {
+          type: "string"
+        },
+        gitignore_template: {
+          type: "string"
+        },
+        has_issues: {
+          type: "boolean"
+        },
+        has_projects: {
+          type: "boolean"
+        },
+        has_wiki: {
+          type: "boolean"
+        },
+        homepage: {
+          type: "string"
+        },
+        is_template: {
+          type: "boolean"
+        },
+        license_template: {
+          type: "string"
+        },
+        name: {
+          required: true,
+          type: "string"
+        },
+        private: {
+          type: "boolean"
+        },
+        team_id: {
+          type: "integer"
+        },
+        visibility: {
+          enum: ["public", "private", "visibility", "internal"],
+          type: "string"
+        }
+      },
+      url: "/user/repos"
+    },
+    createFork: {
+      method: "POST",
+      params: {
+        organization: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/forks"
+    },
+    createHook: {
+      method: "POST",
+      params: {
+        active: {
+          type: "boolean"
+        },
+        config: {
+          required: true,
+          type: "object"
+        },
+        "config.content_type": {
+          type: "string"
+        },
+        "config.insecure_ssl": {
+          type: "string"
+        },
+        "config.secret": {
+          type: "string"
+        },
+        "config.url": {
+          required: true,
+          type: "string"
+        },
+        events: {
+          type: "string[]"
+        },
+        name: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/hooks"
+    },
+    createInOrg: {
+      method: "POST",
+      params: {
+        allow_merge_commit: {
+          type: "boolean"
+        },
+        allow_rebase_merge: {
+          type: "boolean"
+        },
+        allow_squash_merge: {
+          type: "boolean"
+        },
+        auto_init: {
+          type: "boolean"
+        },
+        delete_branch_on_merge: {
+          type: "boolean"
+        },
+        description: {
+          type: "string"
+        },
+        gitignore_template: {
+          type: "string"
+        },
+        has_issues: {
+          type: "boolean"
+        },
+        has_projects: {
+          type: "boolean"
+        },
+        has_wiki: {
+          type: "boolean"
+        },
+        homepage: {
+          type: "string"
+        },
+        is_template: {
+          type: "boolean"
+        },
+        license_template: {
+          type: "string"
+        },
+        name: {
+          required: true,
+          type: "string"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        private: {
+          type: "boolean"
+        },
+        team_id: {
+          type: "integer"
+        },
+        visibility: {
+          enum: ["public", "private", "visibility", "internal"],
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/repos"
+    },
+    createOrUpdateFile: {
+      method: "PUT",
+      params: {
+        author: {
+          type: "object"
+        },
+        "author.email": {
+          required: true,
+          type: "string"
+        },
+        "author.name": {
+          required: true,
+          type: "string"
+        },
+        branch: {
+          type: "string"
+        },
+        committer: {
+          type: "object"
+        },
+        "committer.email": {
+          required: true,
+          type: "string"
+        },
+        "committer.name": {
+          required: true,
+          type: "string"
+        },
+        content: {
+          required: true,
+          type: "string"
+        },
+        message: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        path: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        sha: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/contents/:path"
+    },
+    createRelease: {
+      method: "POST",
+      params: {
+        body: {
+          type: "string"
+        },
+        draft: {
+          type: "boolean"
+        },
+        name: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        prerelease: {
+          type: "boolean"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        tag_name: {
+          required: true,
+          type: "string"
+        },
+        target_commitish: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/releases"
+    },
+    createStatus: {
+      method: "POST",
+      params: {
+        context: {
+          type: "string"
+        },
+        description: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        sha: {
+          required: true,
+          type: "string"
+        },
+        state: {
+          enum: ["error", "failure", "pending", "success"],
+          required: true,
+          type: "string"
+        },
+        target_url: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/statuses/:sha"
+    },
+    createUsingTemplate: {
+      headers: {
+        accept: "application/vnd.github.baptiste-preview+json"
+      },
+      method: "POST",
+      params: {
+        description: {
+          type: "string"
+        },
+        name: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          type: "string"
+        },
+        private: {
+          type: "boolean"
+        },
+        template_owner: {
+          required: true,
+          type: "string"
+        },
+        template_repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:template_owner/:template_repo/generate"
+    },
+    declineInvitation: {
+      method: "DELETE",
+      params: {
+        invitation_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/user/repository_invitations/:invitation_id"
+    },
+    delete: {
+      method: "DELETE",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo"
+    },
+    deleteCommitComment: {
+      method: "DELETE",
+      params: {
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/comments/:comment_id"
+    },
+    deleteDownload: {
+      method: "DELETE",
+      params: {
+        download_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/downloads/:download_id"
+    },
+    deleteFile: {
+      method: "DELETE",
+      params: {
+        author: {
+          type: "object"
+        },
+        "author.email": {
+          type: "string"
+        },
+        "author.name": {
+          type: "string"
+        },
+        branch: {
+          type: "string"
+        },
+        committer: {
+          type: "object"
+        },
+        "committer.email": {
+          type: "string"
+        },
+        "committer.name": {
+          type: "string"
+        },
+        message: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        path: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        sha: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/contents/:path"
+    },
+    deleteHook: {
+      method: "DELETE",
+      params: {
+        hook_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/hooks/:hook_id"
+    },
+    deleteInvitation: {
+      method: "DELETE",
+      params: {
+        invitation_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/invitations/:invitation_id"
+    },
+    deleteRelease: {
+      method: "DELETE",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        release_id: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/releases/:release_id"
+    },
+    deleteReleaseAsset: {
+      method: "DELETE",
+      params: {
+        asset_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/releases/assets/:asset_id"
+    },
+    disableAutomatedSecurityFixes: {
+      headers: {
+        accept: "application/vnd.github.london-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/automated-security-fixes"
+    },
+    disablePagesSite: {
+      headers: {
+        accept: "application/vnd.github.switcheroo-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pages"
+    },
+    disableVulnerabilityAlerts: {
+      headers: {
+        accept: "application/vnd.github.dorian-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/vulnerability-alerts"
+    },
+    enableAutomatedSecurityFixes: {
+      headers: {
+        accept: "application/vnd.github.london-preview+json"
+      },
+      method: "PUT",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/automated-security-fixes"
+    },
+    enablePagesSite: {
+      headers: {
+        accept: "application/vnd.github.switcheroo-preview+json"
+      },
+      method: "POST",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        source: {
+          type: "object"
+        },
+        "source.branch": {
+          enum: ["master", "gh-pages"],
+          type: "string"
+        },
+        "source.path": {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pages"
+    },
+    enableVulnerabilityAlerts: {
+      headers: {
+        accept: "application/vnd.github.dorian-preview+json"
+      },
+      method: "PUT",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/vulnerability-alerts"
+    },
+    get: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo"
+    },
+    getAppsWithAccessToProtectedBranch: {
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/apps"
+    },
+    getArchiveLink: {
+      method: "GET",
+      params: {
+        archive_format: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        ref: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/:archive_format/:ref"
+    },
+    getBranch: {
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch"
+    },
+    getBranchProtection: {
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection"
+    },
+    getClones: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        per: {
+          enum: ["day", "week"],
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/traffic/clones"
+    },
+    getCodeFrequencyStats: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/stats/code_frequency"
+    },
+    getCollaboratorPermissionLevel: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/collaborators/:username/permission"
+    },
+    getCombinedStatusForRef: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        ref: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/commits/:ref/status"
+    },
+    getCommit: {
+      method: "GET",
+      params: {
+        commit_sha: {
+          alias: "ref",
+          deprecated: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        ref: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        sha: {
+          alias: "ref",
+          deprecated: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/commits/:ref"
+    },
+    getCommitActivityStats: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/stats/commit_activity"
+    },
+    getCommitComment: {
+      method: "GET",
+      params: {
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/comments/:comment_id"
+    },
+    getCommitRefSha: {
+      deprecated: "octokit.repos.getCommitRefSha() is deprecated, see https://developer.github.com/v3/repos/commits/#get-a-single-commit",
+      headers: {
+        accept: "application/vnd.github.v3.sha"
+      },
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        ref: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/commits/:ref"
+    },
+    getContents: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        path: {
+          required: true,
+          type: "string"
+        },
+        ref: {
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/contents/:path"
+    },
+    getContributorsStats: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/stats/contributors"
+    },
+    getDeployKey: {
+      method: "GET",
+      params: {
+        key_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/keys/:key_id"
+    },
+    getDeployment: {
+      method: "GET",
+      params: {
+        deployment_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/deployments/:deployment_id"
+    },
+    getDeploymentStatus: {
+      method: "GET",
+      params: {
+        deployment_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        status_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/deployments/:deployment_id/statuses/:status_id"
+    },
+    getDownload: {
+      method: "GET",
+      params: {
+        download_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/downloads/:download_id"
+    },
+    getHook: {
+      method: "GET",
+      params: {
+        hook_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/hooks/:hook_id"
+    },
+    getLatestPagesBuild: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pages/builds/latest"
+    },
+    getLatestRelease: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/releases/latest"
+    },
+    getPages: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pages"
+    },
+    getPagesBuild: {
+      method: "GET",
+      params: {
+        build_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pages/builds/:build_id"
+    },
+    getParticipationStats: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/stats/participation"
+    },
+    getProtectedBranchAdminEnforcement: {
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/enforce_admins"
+    },
+    getProtectedBranchPullRequestReviewEnforcement: {
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/required_pull_request_reviews"
+    },
+    getProtectedBranchRequiredSignatures: {
+      headers: {
+        accept: "application/vnd.github.zzzax-preview+json"
+      },
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/required_signatures"
+    },
+    getProtectedBranchRequiredStatusChecks: {
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/required_status_checks"
+    },
+    getProtectedBranchRestrictions: {
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions"
+    },
+    getPunchCardStats: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/stats/punch_card"
+    },
+    getReadme: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        ref: {
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/readme"
+    },
+    getRelease: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        release_id: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/releases/:release_id"
+    },
+    getReleaseAsset: {
+      method: "GET",
+      params: {
+        asset_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/releases/assets/:asset_id"
+    },
+    getReleaseByTag: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        tag: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/releases/tags/:tag"
+    },
+    getTeamsWithAccessToProtectedBranch: {
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/teams"
+    },
+    getTopPaths: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/traffic/popular/paths"
+    },
+    getTopReferrers: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/traffic/popular/referrers"
+    },
+    getUsersWithAccessToProtectedBranch: {
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/users"
+    },
+    getViews: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        per: {
+          enum: ["day", "week"],
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/traffic/views"
+    },
+    list: {
+      method: "GET",
+      params: {
+        affiliation: {
+          type: "string"
+        },
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        sort: {
+          enum: ["created", "updated", "pushed", "full_name"],
+          type: "string"
+        },
+        type: {
+          enum: ["all", "owner", "public", "private", "member"],
+          type: "string"
+        },
+        visibility: {
+          enum: ["all", "public", "private"],
+          type: "string"
+        }
+      },
+      url: "/user/repos"
+    },
+    listAppsWithAccessToProtectedBranch: {
+      deprecated: "octokit.repos.listAppsWithAccessToProtectedBranch() has been renamed to octokit.repos.getAppsWithAccessToProtectedBranch() (2019-09-13)",
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/apps"
+    },
+    listAssetsForRelease: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        release_id: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/releases/:release_id/assets"
+    },
+    listBranches: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        protected: {
+          type: "boolean"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches"
+    },
+    listBranchesForHeadCommit: {
+      headers: {
+        accept: "application/vnd.github.groot-preview+json"
+      },
+      method: "GET",
+      params: {
+        commit_sha: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/commits/:commit_sha/branches-where-head"
+    },
+    listCollaborators: {
+      method: "GET",
+      params: {
+        affiliation: {
+          enum: ["outside", "direct", "all"],
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/collaborators"
+    },
+    listCommentsForCommit: {
+      method: "GET",
+      params: {
+        commit_sha: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        ref: {
+          alias: "commit_sha",
+          deprecated: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/commits/:commit_sha/comments"
+    },
+    listCommitComments: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/comments"
+    },
+    listCommits: {
+      method: "GET",
+      params: {
+        author: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        path: {
+          type: "string"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        sha: {
+          type: "string"
+        },
+        since: {
+          type: "string"
+        },
+        until: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/commits"
+    },
+    listContributors: {
+      method: "GET",
+      params: {
+        anon: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/contributors"
+    },
+    listDeployKeys: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/keys"
+    },
+    listDeploymentStatuses: {
+      method: "GET",
+      params: {
+        deployment_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/deployments/:deployment_id/statuses"
+    },
+    listDeployments: {
+      method: "GET",
+      params: {
+        environment: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        ref: {
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        sha: {
+          type: "string"
+        },
+        task: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/deployments"
+    },
+    listDownloads: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/downloads"
+    },
+    listForOrg: {
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        sort: {
+          enum: ["created", "updated", "pushed", "full_name"],
+          type: "string"
+        },
+        type: {
+          enum: ["all", "public", "private", "forks", "sources", "member", "internal"],
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/repos"
+    },
+    listForUser: {
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        sort: {
+          enum: ["created", "updated", "pushed", "full_name"],
+          type: "string"
+        },
+        type: {
+          enum: ["all", "owner", "member"],
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/repos"
+    },
+    listForks: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        sort: {
+          enum: ["newest", "oldest", "stargazers"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/forks"
+    },
+    listHooks: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/hooks"
+    },
+    listInvitations: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/invitations"
+    },
+    listInvitationsForAuthenticatedUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/repository_invitations"
+    },
+    listLanguages: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/languages"
+    },
+    listPagesBuilds: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pages/builds"
+    },
+    listProtectedBranchRequiredStatusChecksContexts: {
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/required_status_checks/contexts"
+    },
+    listProtectedBranchTeamRestrictions: {
+      deprecated: "octokit.repos.listProtectedBranchTeamRestrictions() has been renamed to octokit.repos.getTeamsWithAccessToProtectedBranch() (2019-09-09)",
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/teams"
+    },
+    listProtectedBranchUserRestrictions: {
+      deprecated: "octokit.repos.listProtectedBranchUserRestrictions() has been renamed to octokit.repos.getUsersWithAccessToProtectedBranch() (2019-09-09)",
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/users"
+    },
+    listPublic: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        since: {
+          type: "integer"
+        }
+      },
+      url: "/repositories"
+    },
+    listPullRequestsAssociatedWithCommit: {
+      headers: {
+        accept: "application/vnd.github.groot-preview+json"
+      },
+      method: "GET",
+      params: {
+        commit_sha: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/commits/:commit_sha/pulls"
+    },
+    listReleases: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/releases"
+    },
+    listStatusesForRef: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        ref: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/commits/:ref/statuses"
+    },
+    listTags: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/tags"
+    },
+    listTeams: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/teams"
+    },
+    listTeamsWithAccessToProtectedBranch: {
+      deprecated: "octokit.repos.listTeamsWithAccessToProtectedBranch() has been renamed to octokit.repos.getTeamsWithAccessToProtectedBranch() (2019-09-13)",
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/teams"
+    },
+    listTopics: {
+      headers: {
+        accept: "application/vnd.github.mercy-preview+json"
+      },
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/topics"
+    },
+    listUsersWithAccessToProtectedBranch: {
+      deprecated: "octokit.repos.listUsersWithAccessToProtectedBranch() has been renamed to octokit.repos.getUsersWithAccessToProtectedBranch() (2019-09-13)",
+      method: "GET",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/users"
+    },
+    merge: {
+      method: "POST",
+      params: {
+        base: {
+          required: true,
+          type: "string"
+        },
+        commit_message: {
+          type: "string"
+        },
+        head: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/merges"
+    },
+    pingHook: {
+      method: "POST",
+      params: {
+        hook_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/hooks/:hook_id/pings"
+    },
+    removeBranchProtection: {
+      method: "DELETE",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection"
+    },
+    removeCollaborator: {
+      method: "DELETE",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/collaborators/:username"
+    },
+    removeDeployKey: {
+      method: "DELETE",
+      params: {
+        key_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/keys/:key_id"
+    },
+    removeProtectedBranchAdminEnforcement: {
+      method: "DELETE",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/enforce_admins"
+    },
+    removeProtectedBranchAppRestrictions: {
+      method: "DELETE",
+      params: {
+        apps: {
+          mapTo: "data",
+          required: true,
+          type: "string[]"
+        },
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/apps"
+    },
+    removeProtectedBranchPullRequestReviewEnforcement: {
+      method: "DELETE",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/required_pull_request_reviews"
+    },
+    removeProtectedBranchRequiredSignatures: {
+      headers: {
+        accept: "application/vnd.github.zzzax-preview+json"
+      },
+      method: "DELETE",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/required_signatures"
+    },
+    removeProtectedBranchRequiredStatusChecks: {
+      method: "DELETE",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/required_status_checks"
+    },
+    removeProtectedBranchRequiredStatusChecksContexts: {
+      method: "DELETE",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        contexts: {
+          mapTo: "data",
+          required: true,
+          type: "string[]"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/required_status_checks/contexts"
+    },
+    removeProtectedBranchRestrictions: {
+      method: "DELETE",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions"
+    },
+    removeProtectedBranchTeamRestrictions: {
+      method: "DELETE",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        teams: {
+          mapTo: "data",
+          required: true,
+          type: "string[]"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/teams"
+    },
+    removeProtectedBranchUserRestrictions: {
+      method: "DELETE",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        users: {
+          mapTo: "data",
+          required: true,
+          type: "string[]"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/users"
+    },
+    replaceProtectedBranchAppRestrictions: {
+      method: "PUT",
+      params: {
+        apps: {
+          mapTo: "data",
+          required: true,
+          type: "string[]"
+        },
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/apps"
+    },
+    replaceProtectedBranchRequiredStatusChecksContexts: {
+      method: "PUT",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        contexts: {
+          mapTo: "data",
+          required: true,
+          type: "string[]"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/required_status_checks/contexts"
+    },
+    replaceProtectedBranchTeamRestrictions: {
+      method: "PUT",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        teams: {
+          mapTo: "data",
+          required: true,
+          type: "string[]"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/teams"
+    },
+    replaceProtectedBranchUserRestrictions: {
+      method: "PUT",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        users: {
+          mapTo: "data",
+          required: true,
+          type: "string[]"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/restrictions/users"
+    },
+    replaceTopics: {
+      headers: {
+        accept: "application/vnd.github.mercy-preview+json"
+      },
+      method: "PUT",
+      params: {
+        names: {
+          required: true,
+          type: "string[]"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/topics"
+    },
+    requestPageBuild: {
+      method: "POST",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pages/builds"
+    },
+    retrieveCommunityProfileMetrics: {
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/community/profile"
+    },
+    testPushHook: {
+      method: "POST",
+      params: {
+        hook_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/hooks/:hook_id/tests"
+    },
+    transfer: {
+      method: "POST",
+      params: {
+        new_owner: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        team_ids: {
+          type: "integer[]"
+        }
+      },
+      url: "/repos/:owner/:repo/transfer"
+    },
+    update: {
+      method: "PATCH",
+      params: {
+        allow_merge_commit: {
+          type: "boolean"
+        },
+        allow_rebase_merge: {
+          type: "boolean"
+        },
+        allow_squash_merge: {
+          type: "boolean"
+        },
+        archived: {
+          type: "boolean"
+        },
+        default_branch: {
+          type: "string"
+        },
+        delete_branch_on_merge: {
+          type: "boolean"
+        },
+        description: {
+          type: "string"
+        },
+        has_issues: {
+          type: "boolean"
+        },
+        has_projects: {
+          type: "boolean"
+        },
+        has_wiki: {
+          type: "boolean"
+        },
+        homepage: {
+          type: "string"
+        },
+        is_template: {
+          type: "boolean"
+        },
+        name: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        private: {
+          type: "boolean"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        visibility: {
+          enum: ["public", "private", "visibility", "internal"],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo"
+    },
+    updateBranchProtection: {
+      method: "PUT",
+      params: {
+        allow_deletions: {
+          type: "boolean"
+        },
+        allow_force_pushes: {
+          allowNull: true,
+          type: "boolean"
+        },
+        branch: {
+          required: true,
+          type: "string"
+        },
+        enforce_admins: {
+          allowNull: true,
+          required: true,
+          type: "boolean"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        required_linear_history: {
+          type: "boolean"
+        },
+        required_pull_request_reviews: {
+          allowNull: true,
+          required: true,
+          type: "object"
+        },
+        "required_pull_request_reviews.dismiss_stale_reviews": {
+          type: "boolean"
+        },
+        "required_pull_request_reviews.dismissal_restrictions": {
+          type: "object"
+        },
+        "required_pull_request_reviews.dismissal_restrictions.teams": {
+          type: "string[]"
+        },
+        "required_pull_request_reviews.dismissal_restrictions.users": {
+          type: "string[]"
+        },
+        "required_pull_request_reviews.require_code_owner_reviews": {
+          type: "boolean"
+        },
+        "required_pull_request_reviews.required_approving_review_count": {
+          type: "integer"
+        },
+        required_status_checks: {
+          allowNull: true,
+          required: true,
+          type: "object"
+        },
+        "required_status_checks.contexts": {
+          required: true,
+          type: "string[]"
+        },
+        "required_status_checks.strict": {
+          required: true,
+          type: "boolean"
+        },
+        restrictions: {
+          allowNull: true,
+          required: true,
+          type: "object"
+        },
+        "restrictions.apps": {
+          type: "string[]"
+        },
+        "restrictions.teams": {
+          required: true,
+          type: "string[]"
+        },
+        "restrictions.users": {
+          required: true,
+          type: "string[]"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection"
+    },
+    updateCommitComment: {
+      method: "PATCH",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        comment_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/comments/:comment_id"
+    },
+    updateFile: {
+      deprecated: "octokit.repos.updateFile() has been renamed to octokit.repos.createOrUpdateFile() (2019-06-07)",
+      method: "PUT",
+      params: {
+        author: {
+          type: "object"
+        },
+        "author.email": {
+          required: true,
+          type: "string"
+        },
+        "author.name": {
+          required: true,
+          type: "string"
+        },
+        branch: {
+          type: "string"
+        },
+        committer: {
+          type: "object"
+        },
+        "committer.email": {
+          required: true,
+          type: "string"
+        },
+        "committer.name": {
+          required: true,
+          type: "string"
+        },
+        content: {
+          required: true,
+          type: "string"
+        },
+        message: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        path: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        sha: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/contents/:path"
+    },
+    updateHook: {
+      method: "PATCH",
+      params: {
+        active: {
+          type: "boolean"
+        },
+        add_events: {
+          type: "string[]"
+        },
+        config: {
+          type: "object"
+        },
+        "config.content_type": {
+          type: "string"
+        },
+        "config.insecure_ssl": {
+          type: "string"
+        },
+        "config.secret": {
+          type: "string"
+        },
+        "config.url": {
+          required: true,
+          type: "string"
+        },
+        events: {
+          type: "string[]"
+        },
+        hook_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        remove_events: {
+          type: "string[]"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/hooks/:hook_id"
+    },
+    updateInformationAboutPagesSite: {
+      method: "PUT",
+      params: {
+        cname: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        source: {
+          enum: ['"gh-pages"', '"master"', '"master /docs"'],
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/pages"
+    },
+    updateInvitation: {
+      method: "PATCH",
+      params: {
+        invitation_id: {
+          required: true,
+          type: "integer"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        permissions: {
+          enum: ["read", "write", "admin"],
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/invitations/:invitation_id"
+    },
+    updateProtectedBranchPullRequestReviewEnforcement: {
+      method: "PATCH",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        dismiss_stale_reviews: {
+          type: "boolean"
+        },
+        dismissal_restrictions: {
+          type: "object"
+        },
+        "dismissal_restrictions.teams": {
+          type: "string[]"
+        },
+        "dismissal_restrictions.users": {
+          type: "string[]"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        require_code_owner_reviews: {
+          type: "boolean"
+        },
+        required_approving_review_count: {
+          type: "integer"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/required_pull_request_reviews"
+    },
+    updateProtectedBranchRequiredStatusChecks: {
+      method: "PATCH",
+      params: {
+        branch: {
+          required: true,
+          type: "string"
+        },
+        contexts: {
+          type: "string[]"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        strict: {
+          type: "boolean"
+        }
+      },
+      url: "/repos/:owner/:repo/branches/:branch/protection/required_status_checks"
+    },
+    updateRelease: {
+      method: "PATCH",
+      params: {
+        body: {
+          type: "string"
+        },
+        draft: {
+          type: "boolean"
+        },
+        name: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        prerelease: {
+          type: "boolean"
+        },
+        release_id: {
+          required: true,
+          type: "integer"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        tag_name: {
+          type: "string"
+        },
+        target_commitish: {
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/releases/:release_id"
+    },
+    updateReleaseAsset: {
+      method: "PATCH",
+      params: {
+        asset_id: {
+          required: true,
+          type: "integer"
+        },
+        label: {
+          type: "string"
+        },
+        name: {
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/repos/:owner/:repo/releases/assets/:asset_id"
+    },
+    uploadReleaseAsset: {
+      method: "POST",
+      params: {
+        data: {
+          mapTo: "data",
+          required: true,
+          type: "string | object"
+        },
+        file: {
+          alias: "data",
+          deprecated: true,
+          type: "string | object"
+        },
+        headers: {
+          required: true,
+          type: "object"
+        },
+        "headers.content-length": {
+          required: true,
+          type: "integer"
+        },
+        "headers.content-type": {
+          required: true,
+          type: "string"
+        },
+        label: {
+          type: "string"
+        },
+        name: {
+          required: true,
+          type: "string"
+        },
+        url: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: ":url"
+    }
+  },
+  search: {
+    code: {
+      method: "GET",
+      params: {
+        order: {
+          enum: ["desc", "asc"],
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        q: {
+          required: true,
+          type: "string"
+        },
+        sort: {
+          enum: ["indexed"],
+          type: "string"
+        }
+      },
+      url: "/search/code"
+    },
+    commits: {
+      headers: {
+        accept: "application/vnd.github.cloak-preview+json"
+      },
+      method: "GET",
+      params: {
+        order: {
+          enum: ["desc", "asc"],
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        q: {
+          required: true,
+          type: "string"
+        },
+        sort: {
+          enum: ["author-date", "committer-date"],
+          type: "string"
+        }
+      },
+      url: "/search/commits"
+    },
+    issues: {
+      deprecated: "octokit.search.issues() has been renamed to octokit.search.issuesAndPullRequests() (2018-12-27)",
+      method: "GET",
+      params: {
+        order: {
+          enum: ["desc", "asc"],
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        q: {
+          required: true,
+          type: "string"
+        },
+        sort: {
+          enum: ["comments", "reactions", "reactions-+1", "reactions--1", "reactions-smile", "reactions-thinking_face", "reactions-heart", "reactions-tada", "interactions", "created", "updated"],
+          type: "string"
+        }
+      },
+      url: "/search/issues"
+    },
+    issuesAndPullRequests: {
+      method: "GET",
+      params: {
+        order: {
+          enum: ["desc", "asc"],
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        q: {
+          required: true,
+          type: "string"
+        },
+        sort: {
+          enum: ["comments", "reactions", "reactions-+1", "reactions--1", "reactions-smile", "reactions-thinking_face", "reactions-heart", "reactions-tada", "interactions", "created", "updated"],
+          type: "string"
+        }
+      },
+      url: "/search/issues"
+    },
+    labels: {
+      method: "GET",
+      params: {
+        order: {
+          enum: ["desc", "asc"],
+          type: "string"
+        },
+        q: {
+          required: true,
+          type: "string"
+        },
+        repository_id: {
+          required: true,
+          type: "integer"
+        },
+        sort: {
+          enum: ["created", "updated"],
+          type: "string"
+        }
+      },
+      url: "/search/labels"
+    },
+    repos: {
+      method: "GET",
+      params: {
+        order: {
+          enum: ["desc", "asc"],
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        q: {
+          required: true,
+          type: "string"
+        },
+        sort: {
+          enum: ["stars", "forks", "help-wanted-issues", "updated"],
+          type: "string"
+        }
+      },
+      url: "/search/repositories"
+    },
+    topics: {
+      method: "GET",
+      params: {
+        q: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/search/topics"
+    },
+    users: {
+      method: "GET",
+      params: {
+        order: {
+          enum: ["desc", "asc"],
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        q: {
+          required: true,
+          type: "string"
+        },
+        sort: {
+          enum: ["followers", "repositories", "joined"],
+          type: "string"
+        }
+      },
+      url: "/search/users"
+    }
+  },
+  teams: {
+    addMember: {
+      deprecated: "octokit.teams.addMember() has been renamed to octokit.teams.addMemberLegacy() (2020-01-16)",
+      method: "PUT",
+      params: {
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/members/:username"
+    },
+    addMemberLegacy: {
+      deprecated: "octokit.teams.addMemberLegacy() is deprecated, see https://developer.github.com/v3/teams/members/#add-team-member-legacy",
+      method: "PUT",
+      params: {
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/members/:username"
+    },
+    addOrUpdateMembership: {
+      deprecated: "octokit.teams.addOrUpdateMembership() has been renamed to octokit.teams.addOrUpdateMembershipLegacy() (2020-01-16)",
+      method: "PUT",
+      params: {
+        role: {
+          enum: ["member", "maintainer"],
+          type: "string"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/memberships/:username"
+    },
+    addOrUpdateMembershipInOrg: {
+      method: "PUT",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        role: {
+          enum: ["member", "maintainer"],
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/memberships/:username"
+    },
+    addOrUpdateMembershipLegacy: {
+      deprecated: "octokit.teams.addOrUpdateMembershipLegacy() is deprecated, see https://developer.github.com/v3/teams/members/#add-or-update-team-membership-legacy",
+      method: "PUT",
+      params: {
+        role: {
+          enum: ["member", "maintainer"],
+          type: "string"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/memberships/:username"
+    },
+    addOrUpdateProject: {
+      deprecated: "octokit.teams.addOrUpdateProject() has been renamed to octokit.teams.addOrUpdateProjectLegacy() (2020-01-16)",
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "PUT",
+      params: {
+        permission: {
+          enum: ["read", "write", "admin"],
+          type: "string"
+        },
+        project_id: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/projects/:project_id"
+    },
+    addOrUpdateProjectInOrg: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "PUT",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        permission: {
+          enum: ["read", "write", "admin"],
+          type: "string"
+        },
+        project_id: {
+          required: true,
+          type: "integer"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/projects/:project_id"
+    },
+    addOrUpdateProjectLegacy: {
+      deprecated: "octokit.teams.addOrUpdateProjectLegacy() is deprecated, see https://developer.github.com/v3/teams/#add-or-update-team-project-legacy",
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "PUT",
+      params: {
+        permission: {
+          enum: ["read", "write", "admin"],
+          type: "string"
+        },
+        project_id: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/projects/:project_id"
+    },
+    addOrUpdateRepo: {
+      deprecated: "octokit.teams.addOrUpdateRepo() has been renamed to octokit.teams.addOrUpdateRepoLegacy() (2020-01-16)",
+      method: "PUT",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        permission: {
+          enum: ["pull", "push", "admin"],
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/repos/:owner/:repo"
+    },
+    addOrUpdateRepoInOrg: {
+      method: "PUT",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        permission: {
+          enum: ["pull", "push", "admin"],
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/repos/:owner/:repo"
+    },
+    addOrUpdateRepoLegacy: {
+      deprecated: "octokit.teams.addOrUpdateRepoLegacy() is deprecated, see https://developer.github.com/v3/teams/#add-or-update-team-repository-legacy",
+      method: "PUT",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        permission: {
+          enum: ["pull", "push", "admin"],
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/repos/:owner/:repo"
+    },
+    checkManagesRepo: {
+      deprecated: "octokit.teams.checkManagesRepo() has been renamed to octokit.teams.checkManagesRepoLegacy() (2020-01-16)",
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/repos/:owner/:repo"
+    },
+    checkManagesRepoInOrg: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/repos/:owner/:repo"
+    },
+    checkManagesRepoLegacy: {
+      deprecated: "octokit.teams.checkManagesRepoLegacy() is deprecated, see https://developer.github.com/v3/teams/#check-if-a-team-manages-a-repository-legacy",
+      method: "GET",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/repos/:owner/:repo"
+    },
+    create: {
+      method: "POST",
+      params: {
+        description: {
+          type: "string"
+        },
+        maintainers: {
+          type: "string[]"
+        },
+        name: {
+          required: true,
+          type: "string"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        parent_team_id: {
+          type: "integer"
+        },
+        permission: {
+          enum: ["pull", "push", "admin"],
+          type: "string"
+        },
+        privacy: {
+          enum: ["secret", "closed"],
+          type: "string"
+        },
+        repo_names: {
+          type: "string[]"
+        }
+      },
+      url: "/orgs/:org/teams"
+    },
+    createDiscussion: {
+      deprecated: "octokit.teams.createDiscussion() has been renamed to octokit.teams.createDiscussionLegacy() (2020-01-16)",
+      method: "POST",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        private: {
+          type: "boolean"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        title: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/discussions"
+    },
+    createDiscussionComment: {
+      deprecated: "octokit.teams.createDiscussionComment() has been renamed to octokit.teams.createDiscussionCommentLegacy() (2020-01-16)",
+      method: "POST",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/comments"
+    },
+    createDiscussionCommentInOrg: {
+      method: "POST",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/discussions/:discussion_number/comments"
+    },
+    createDiscussionCommentLegacy: {
+      deprecated: "octokit.teams.createDiscussionCommentLegacy() is deprecated, see https://developer.github.com/v3/teams/discussion_comments/#create-a-comment-legacy",
+      method: "POST",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/comments"
+    },
+    createDiscussionInOrg: {
+      method: "POST",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        private: {
+          type: "boolean"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        },
+        title: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/discussions"
+    },
+    createDiscussionLegacy: {
+      deprecated: "octokit.teams.createDiscussionLegacy() is deprecated, see https://developer.github.com/v3/teams/discussions/#create-a-discussion-legacy",
+      method: "POST",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        private: {
+          type: "boolean"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        title: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/discussions"
+    },
+    delete: {
+      deprecated: "octokit.teams.delete() has been renamed to octokit.teams.deleteLegacy() (2020-01-16)",
+      method: "DELETE",
+      params: {
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id"
+    },
+    deleteDiscussion: {
+      deprecated: "octokit.teams.deleteDiscussion() has been renamed to octokit.teams.deleteDiscussionLegacy() (2020-01-16)",
+      method: "DELETE",
+      params: {
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number"
+    },
+    deleteDiscussionComment: {
+      deprecated: "octokit.teams.deleteDiscussionComment() has been renamed to octokit.teams.deleteDiscussionCommentLegacy() (2020-01-16)",
+      method: "DELETE",
+      params: {
+        comment_number: {
+          required: true,
+          type: "integer"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/comments/:comment_number"
+    },
+    deleteDiscussionCommentInOrg: {
+      method: "DELETE",
+      params: {
+        comment_number: {
+          required: true,
+          type: "integer"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/discussions/:discussion_number/comments/:comment_number"
+    },
+    deleteDiscussionCommentLegacy: {
+      deprecated: "octokit.teams.deleteDiscussionCommentLegacy() is deprecated, see https://developer.github.com/v3/teams/discussion_comments/#delete-a-comment-legacy",
+      method: "DELETE",
+      params: {
+        comment_number: {
+          required: true,
+          type: "integer"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/comments/:comment_number"
+    },
+    deleteDiscussionInOrg: {
+      method: "DELETE",
+      params: {
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/discussions/:discussion_number"
+    },
+    deleteDiscussionLegacy: {
+      deprecated: "octokit.teams.deleteDiscussionLegacy() is deprecated, see https://developer.github.com/v3/teams/discussions/#delete-a-discussion-legacy",
+      method: "DELETE",
+      params: {
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number"
+    },
+    deleteInOrg: {
+      method: "DELETE",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug"
+    },
+    deleteLegacy: {
+      deprecated: "octokit.teams.deleteLegacy() is deprecated, see https://developer.github.com/v3/teams/#delete-team-legacy",
+      method: "DELETE",
+      params: {
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id"
+    },
+    get: {
+      deprecated: "octokit.teams.get() has been renamed to octokit.teams.getLegacy() (2020-01-16)",
+      method: "GET",
+      params: {
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id"
+    },
+    getByName: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug"
+    },
+    getDiscussion: {
+      deprecated: "octokit.teams.getDiscussion() has been renamed to octokit.teams.getDiscussionLegacy() (2020-01-16)",
+      method: "GET",
+      params: {
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number"
+    },
+    getDiscussionComment: {
+      deprecated: "octokit.teams.getDiscussionComment() has been renamed to octokit.teams.getDiscussionCommentLegacy() (2020-01-16)",
+      method: "GET",
+      params: {
+        comment_number: {
+          required: true,
+          type: "integer"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/comments/:comment_number"
+    },
+    getDiscussionCommentInOrg: {
+      method: "GET",
+      params: {
+        comment_number: {
+          required: true,
+          type: "integer"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/discussions/:discussion_number/comments/:comment_number"
+    },
+    getDiscussionCommentLegacy: {
+      deprecated: "octokit.teams.getDiscussionCommentLegacy() is deprecated, see https://developer.github.com/v3/teams/discussion_comments/#get-a-single-comment-legacy",
+      method: "GET",
+      params: {
+        comment_number: {
+          required: true,
+          type: "integer"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/comments/:comment_number"
+    },
+    getDiscussionInOrg: {
+      method: "GET",
+      params: {
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/discussions/:discussion_number"
+    },
+    getDiscussionLegacy: {
+      deprecated: "octokit.teams.getDiscussionLegacy() is deprecated, see https://developer.github.com/v3/teams/discussions/#get-a-single-discussion-legacy",
+      method: "GET",
+      params: {
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number"
+    },
+    getLegacy: {
+      deprecated: "octokit.teams.getLegacy() is deprecated, see https://developer.github.com/v3/teams/#get-team-legacy",
+      method: "GET",
+      params: {
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id"
+    },
+    getMember: {
+      deprecated: "octokit.teams.getMember() has been renamed to octokit.teams.getMemberLegacy() (2020-01-16)",
+      method: "GET",
+      params: {
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/members/:username"
+    },
+    getMemberLegacy: {
+      deprecated: "octokit.teams.getMemberLegacy() is deprecated, see https://developer.github.com/v3/teams/members/#get-team-member-legacy",
+      method: "GET",
+      params: {
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/members/:username"
+    },
+    getMembership: {
+      deprecated: "octokit.teams.getMembership() has been renamed to octokit.teams.getMembershipLegacy() (2020-01-16)",
+      method: "GET",
+      params: {
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/memberships/:username"
+    },
+    getMembershipInOrg: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/memberships/:username"
+    },
+    getMembershipLegacy: {
+      deprecated: "octokit.teams.getMembershipLegacy() is deprecated, see https://developer.github.com/v3/teams/members/#get-team-membership-legacy",
+      method: "GET",
+      params: {
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/memberships/:username"
+    },
+    list: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/orgs/:org/teams"
+    },
+    listChild: {
+      deprecated: "octokit.teams.listChild() has been renamed to octokit.teams.listChildLegacy() (2020-01-16)",
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/teams"
+    },
+    listChildInOrg: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/teams"
+    },
+    listChildLegacy: {
+      deprecated: "octokit.teams.listChildLegacy() is deprecated, see https://developer.github.com/v3/teams/#list-child-teams-legacy",
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/teams"
+    },
+    listDiscussionComments: {
+      deprecated: "octokit.teams.listDiscussionComments() has been renamed to octokit.teams.listDiscussionCommentsLegacy() (2020-01-16)",
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/comments"
+    },
+    listDiscussionCommentsInOrg: {
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/discussions/:discussion_number/comments"
+    },
+    listDiscussionCommentsLegacy: {
+      deprecated: "octokit.teams.listDiscussionCommentsLegacy() is deprecated, see https://developer.github.com/v3/teams/discussion_comments/#list-comments-legacy",
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/comments"
+    },
+    listDiscussions: {
+      deprecated: "octokit.teams.listDiscussions() has been renamed to octokit.teams.listDiscussionsLegacy() (2020-01-16)",
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions"
+    },
+    listDiscussionsInOrg: {
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/discussions"
+    },
+    listDiscussionsLegacy: {
+      deprecated: "octokit.teams.listDiscussionsLegacy() is deprecated, see https://developer.github.com/v3/teams/discussions/#list-discussions-legacy",
+      method: "GET",
+      params: {
+        direction: {
+          enum: ["asc", "desc"],
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions"
+    },
+    listForAuthenticatedUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/teams"
+    },
+    listMembers: {
+      deprecated: "octokit.teams.listMembers() has been renamed to octokit.teams.listMembersLegacy() (2020-01-16)",
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        role: {
+          enum: ["member", "maintainer", "all"],
+          type: "string"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/members"
+    },
+    listMembersInOrg: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        role: {
+          enum: ["member", "maintainer", "all"],
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/members"
+    },
+    listMembersLegacy: {
+      deprecated: "octokit.teams.listMembersLegacy() is deprecated, see https://developer.github.com/v3/teams/members/#list-team-members-legacy",
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        role: {
+          enum: ["member", "maintainer", "all"],
+          type: "string"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/members"
+    },
+    listPendingInvitations: {
+      deprecated: "octokit.teams.listPendingInvitations() has been renamed to octokit.teams.listPendingInvitationsLegacy() (2020-01-16)",
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/invitations"
+    },
+    listPendingInvitationsInOrg: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/invitations"
+    },
+    listPendingInvitationsLegacy: {
+      deprecated: "octokit.teams.listPendingInvitationsLegacy() is deprecated, see https://developer.github.com/v3/teams/members/#list-pending-team-invitations-legacy",
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/invitations"
+    },
+    listProjects: {
+      deprecated: "octokit.teams.listProjects() has been renamed to octokit.teams.listProjectsLegacy() (2020-01-16)",
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/projects"
+    },
+    listProjectsInOrg: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/projects"
+    },
+    listProjectsLegacy: {
+      deprecated: "octokit.teams.listProjectsLegacy() is deprecated, see https://developer.github.com/v3/teams/#list-team-projects-legacy",
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/projects"
+    },
+    listRepos: {
+      deprecated: "octokit.teams.listRepos() has been renamed to octokit.teams.listReposLegacy() (2020-01-16)",
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/repos"
+    },
+    listReposInOrg: {
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/repos"
+    },
+    listReposLegacy: {
+      deprecated: "octokit.teams.listReposLegacy() is deprecated, see https://developer.github.com/v3/teams/#list-team-repos-legacy",
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/repos"
+    },
+    removeMember: {
+      deprecated: "octokit.teams.removeMember() has been renamed to octokit.teams.removeMemberLegacy() (2020-01-16)",
+      method: "DELETE",
+      params: {
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/members/:username"
+    },
+    removeMemberLegacy: {
+      deprecated: "octokit.teams.removeMemberLegacy() is deprecated, see https://developer.github.com/v3/teams/members/#remove-team-member-legacy",
+      method: "DELETE",
+      params: {
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/members/:username"
+    },
+    removeMembership: {
+      deprecated: "octokit.teams.removeMembership() has been renamed to octokit.teams.removeMembershipLegacy() (2020-01-16)",
+      method: "DELETE",
+      params: {
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/memberships/:username"
+    },
+    removeMembershipInOrg: {
+      method: "DELETE",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/memberships/:username"
+    },
+    removeMembershipLegacy: {
+      deprecated: "octokit.teams.removeMembershipLegacy() is deprecated, see https://developer.github.com/v3/teams/members/#remove-team-membership-legacy",
+      method: "DELETE",
+      params: {
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/memberships/:username"
+    },
+    removeProject: {
+      deprecated: "octokit.teams.removeProject() has been renamed to octokit.teams.removeProjectLegacy() (2020-01-16)",
+      method: "DELETE",
+      params: {
+        project_id: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/projects/:project_id"
+    },
+    removeProjectInOrg: {
+      method: "DELETE",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        project_id: {
+          required: true,
+          type: "integer"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/projects/:project_id"
+    },
+    removeProjectLegacy: {
+      deprecated: "octokit.teams.removeProjectLegacy() is deprecated, see https://developer.github.com/v3/teams/#remove-team-project-legacy",
+      method: "DELETE",
+      params: {
+        project_id: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/projects/:project_id"
+    },
+    removeRepo: {
+      deprecated: "octokit.teams.removeRepo() has been renamed to octokit.teams.removeRepoLegacy() (2020-01-16)",
+      method: "DELETE",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/repos/:owner/:repo"
+    },
+    removeRepoInOrg: {
+      method: "DELETE",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/repos/:owner/:repo"
+    },
+    removeRepoLegacy: {
+      deprecated: "octokit.teams.removeRepoLegacy() is deprecated, see https://developer.github.com/v3/teams/#remove-team-repository-legacy",
+      method: "DELETE",
+      params: {
+        owner: {
+          required: true,
+          type: "string"
+        },
+        repo: {
+          required: true,
+          type: "string"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/repos/:owner/:repo"
+    },
+    reviewProject: {
+      deprecated: "octokit.teams.reviewProject() has been renamed to octokit.teams.reviewProjectLegacy() (2020-01-16)",
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        project_id: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/projects/:project_id"
+    },
+    reviewProjectInOrg: {
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        org: {
+          required: true,
+          type: "string"
+        },
+        project_id: {
+          required: true,
+          type: "integer"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/projects/:project_id"
+    },
+    reviewProjectLegacy: {
+      deprecated: "octokit.teams.reviewProjectLegacy() is deprecated, see https://developer.github.com/v3/teams/#review-a-team-project-legacy",
+      headers: {
+        accept: "application/vnd.github.inertia-preview+json"
+      },
+      method: "GET",
+      params: {
+        project_id: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/projects/:project_id"
+    },
+    update: {
+      deprecated: "octokit.teams.update() has been renamed to octokit.teams.updateLegacy() (2020-01-16)",
+      method: "PATCH",
+      params: {
+        description: {
+          type: "string"
+        },
+        name: {
+          required: true,
+          type: "string"
+        },
+        parent_team_id: {
+          type: "integer"
+        },
+        permission: {
+          enum: ["pull", "push", "admin"],
+          type: "string"
+        },
+        privacy: {
+          enum: ["secret", "closed"],
+          type: "string"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id"
+    },
+    updateDiscussion: {
+      deprecated: "octokit.teams.updateDiscussion() has been renamed to octokit.teams.updateDiscussionLegacy() (2020-01-16)",
+      method: "PATCH",
+      params: {
+        body: {
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        title: {
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number"
+    },
+    updateDiscussionComment: {
+      deprecated: "octokit.teams.updateDiscussionComment() has been renamed to octokit.teams.updateDiscussionCommentLegacy() (2020-01-16)",
+      method: "PATCH",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        comment_number: {
+          required: true,
+          type: "integer"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/comments/:comment_number"
+    },
+    updateDiscussionCommentInOrg: {
+      method: "PATCH",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        comment_number: {
+          required: true,
+          type: "integer"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/discussions/:discussion_number/comments/:comment_number"
+    },
+    updateDiscussionCommentLegacy: {
+      deprecated: "octokit.teams.updateDiscussionCommentLegacy() is deprecated, see https://developer.github.com/v3/teams/discussion_comments/#edit-a-comment-legacy",
+      method: "PATCH",
+      params: {
+        body: {
+          required: true,
+          type: "string"
+        },
+        comment_number: {
+          required: true,
+          type: "integer"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number/comments/:comment_number"
+    },
+    updateDiscussionInOrg: {
+      method: "PATCH",
+      params: {
+        body: {
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        },
+        title: {
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug/discussions/:discussion_number"
+    },
+    updateDiscussionLegacy: {
+      deprecated: "octokit.teams.updateDiscussionLegacy() is deprecated, see https://developer.github.com/v3/teams/discussions/#edit-a-discussion-legacy",
+      method: "PATCH",
+      params: {
+        body: {
+          type: "string"
+        },
+        discussion_number: {
+          required: true,
+          type: "integer"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        },
+        title: {
+          type: "string"
+        }
+      },
+      url: "/teams/:team_id/discussions/:discussion_number"
+    },
+    updateInOrg: {
+      method: "PATCH",
+      params: {
+        description: {
+          type: "string"
+        },
+        name: {
+          required: true,
+          type: "string"
+        },
+        org: {
+          required: true,
+          type: "string"
+        },
+        parent_team_id: {
+          type: "integer"
+        },
+        permission: {
+          enum: ["pull", "push", "admin"],
+          type: "string"
+        },
+        privacy: {
+          enum: ["secret", "closed"],
+          type: "string"
+        },
+        team_slug: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/orgs/:org/teams/:team_slug"
+    },
+    updateLegacy: {
+      deprecated: "octokit.teams.updateLegacy() is deprecated, see https://developer.github.com/v3/teams/#edit-team-legacy",
+      method: "PATCH",
+      params: {
+        description: {
+          type: "string"
+        },
+        name: {
+          required: true,
+          type: "string"
+        },
+        parent_team_id: {
+          type: "integer"
+        },
+        permission: {
+          enum: ["pull", "push", "admin"],
+          type: "string"
+        },
+        privacy: {
+          enum: ["secret", "closed"],
+          type: "string"
+        },
+        team_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/teams/:team_id"
+    }
+  },
+  users: {
+    addEmails: {
+      method: "POST",
+      params: {
+        emails: {
+          required: true,
+          type: "string[]"
+        }
+      },
+      url: "/user/emails"
+    },
+    block: {
+      method: "PUT",
+      params: {
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/user/blocks/:username"
+    },
+    checkBlocked: {
+      method: "GET",
+      params: {
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/user/blocks/:username"
+    },
+    checkFollowing: {
+      method: "GET",
+      params: {
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/user/following/:username"
+    },
+    checkFollowingForUser: {
+      method: "GET",
+      params: {
+        target_user: {
+          required: true,
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/following/:target_user"
+    },
+    createGpgKey: {
+      method: "POST",
+      params: {
+        armored_public_key: {
+          type: "string"
+        }
+      },
+      url: "/user/gpg_keys"
+    },
+    createPublicKey: {
+      method: "POST",
+      params: {
+        key: {
+          type: "string"
+        },
+        title: {
+          type: "string"
+        }
+      },
+      url: "/user/keys"
+    },
+    deleteEmails: {
+      method: "DELETE",
+      params: {
+        emails: {
+          required: true,
+          type: "string[]"
+        }
+      },
+      url: "/user/emails"
+    },
+    deleteGpgKey: {
+      method: "DELETE",
+      params: {
+        gpg_key_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/user/gpg_keys/:gpg_key_id"
+    },
+    deletePublicKey: {
+      method: "DELETE",
+      params: {
+        key_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/user/keys/:key_id"
+    },
+    follow: {
+      method: "PUT",
+      params: {
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/user/following/:username"
+    },
+    getAuthenticated: {
+      method: "GET",
+      params: {},
+      url: "/user"
+    },
+    getByUsername: {
+      method: "GET",
+      params: {
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username"
+    },
+    getContextForUser: {
+      method: "GET",
+      params: {
+        subject_id: {
+          type: "string"
+        },
+        subject_type: {
+          enum: ["organization", "repository", "issue", "pull_request"],
+          type: "string"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/hovercard"
+    },
+    getGpgKey: {
+      method: "GET",
+      params: {
+        gpg_key_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/user/gpg_keys/:gpg_key_id"
+    },
+    getPublicKey: {
+      method: "GET",
+      params: {
+        key_id: {
+          required: true,
+          type: "integer"
+        }
+      },
+      url: "/user/keys/:key_id"
+    },
+    list: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        since: {
+          type: "string"
+        }
+      },
+      url: "/users"
+    },
+    listBlocked: {
+      method: "GET",
+      params: {},
+      url: "/user/blocks"
+    },
+    listEmails: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/emails"
+    },
+    listFollowersForAuthenticatedUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/followers"
+    },
+    listFollowersForUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/followers"
+    },
+    listFollowingForAuthenticatedUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/following"
+    },
+    listFollowingForUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/following"
+    },
+    listGpgKeys: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/gpg_keys"
+    },
+    listGpgKeysForUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/gpg_keys"
+    },
+    listPublicEmails: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/public_emails"
+    },
+    listPublicKeys: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        }
+      },
+      url: "/user/keys"
+    },
+    listPublicKeysForUser: {
+      method: "GET",
+      params: {
+        page: {
+          type: "integer"
+        },
+        per_page: {
+          type: "integer"
+        },
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/users/:username/keys"
+    },
+    togglePrimaryEmailVisibility: {
+      method: "PATCH",
+      params: {
+        email: {
+          required: true,
+          type: "string"
+        },
+        visibility: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/user/email/visibility"
+    },
+    unblock: {
+      method: "DELETE",
+      params: {
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/user/blocks/:username"
+    },
+    unfollow: {
+      method: "DELETE",
+      params: {
+        username: {
+          required: true,
+          type: "string"
+        }
+      },
+      url: "/user/following/:username"
+    },
+    updateAuthenticated: {
+      method: "PATCH",
+      params: {
+        bio: {
+          type: "string"
+        },
+        blog: {
+          type: "string"
+        },
+        company: {
+          type: "string"
+        },
+        email: {
+          type: "string"
+        },
+        hireable: {
+          type: "boolean"
+        },
+        location: {
+          type: "string"
+        },
+        name: {
+          type: "string"
+        }
+      },
+      url: "/user"
+    }
   }
+};
 
-  self.silent = !!options.silent
-  self.pattern = pattern
-  self.strict = options.strict !== false
-  self.realpath = !!options.realpath
-  self.realpathCache = options.realpathCache || Object.create(null)
-  self.follow = !!options.follow
-  self.dot = !!options.dot
-  self.mark = !!options.mark
-  self.nodir = !!options.nodir
-  if (self.nodir)
-    self.mark = true
-  self.sync = !!options.sync
-  self.nounique = !!options.nounique
-  self.nonull = !!options.nonull
-  self.nosort = !!options.nosort
-  self.nocase = !!options.nocase
-  self.stat = !!options.stat
-  self.noprocess = !!options.noprocess
-  self.absolute = !!options.absolute
+const VERSION = "2.4.0";
 
-  self.maxLength = options.maxLength || Infinity
-  self.cache = options.cache || Object.create(null)
-  self.statCache = options.statCache || Object.create(null)
-  self.symlinks = options.symlinks || Object.create(null)
+function registerEndpoints(octokit, routes) {
+  Object.keys(routes).forEach(namespaceName => {
+    if (!octokit[namespaceName]) {
+      octokit[namespaceName] = {};
+    }
 
-  setupIgnores(self, options)
+    Object.keys(routes[namespaceName]).forEach(apiName => {
+      const apiOptions = routes[namespaceName][apiName];
+      const endpointDefaults = ["method", "url", "headers"].reduce((map, key) => {
+        if (typeof apiOptions[key] !== "undefined") {
+          map[key] = apiOptions[key];
+        }
 
-  self.changedCwd = false
-  var cwd = process.cwd()
-  if (!ownProp(options, "cwd"))
-    self.cwd = cwd
-  else {
-    self.cwd = path.resolve(options.cwd)
-    self.changedCwd = self.cwd !== cwd
-  }
+        return map;
+      }, {});
+      endpointDefaults.request = {
+        validate: apiOptions.params
+      };
+      let request = octokit.request.defaults(endpointDefaults); // patch request & endpoint methods to support deprecated parameters.
+      // Not the most elegant solution, but we don’t want to move deprecation
+      // logic into octokit/endpoint.js as it’s out of scope
 
-  self.root = options.root || path.resolve(self.cwd, "/")
-  self.root = path.resolve(self.root)
-  if (process.platform === "win32")
-    self.root = self.root.replace(/\\/g, "/")
+      const hasDeprecatedParam = Object.keys(apiOptions.params || {}).find(key => apiOptions.params[key].deprecated);
 
-  // TODO: is an absolute `cwd` supposed to be resolved against `root`?
-  // e.g. { cwd: '/test', root: __dirname } === path.join(__dirname, '/test')
-  self.cwdAbs = isAbsolute(self.cwd) ? self.cwd : makeAbs(self, self.cwd)
-  if (process.platform === "win32")
-    self.cwdAbs = self.cwdAbs.replace(/\\/g, "/")
-  self.nomount = !!options.nomount
-
-  // disable comments and negation in Minimatch.
-  // Note that they are not supported in Glob itself anyway.
-  options.nonegate = true
-  options.nocomment = true
-
-  self.minimatch = new Minimatch(pattern, options)
-  self.options = self.minimatch.options
-}
-
-function finish (self) {
-  var nou = self.nounique
-  var all = nou ? [] : Object.create(null)
-
-  for (var i = 0, l = self.matches.length; i < l; i ++) {
-    var matches = self.matches[i]
-    if (!matches || Object.keys(matches).length === 0) {
-      if (self.nonull) {
-        // do like the shell, and spit out the literal glob
-        var literal = self.minimatch.globSet[i]
-        if (nou)
-          all.push(literal)
-        else
-          all[literal] = true
+      if (hasDeprecatedParam) {
+        const patch = patchForDeprecation.bind(null, octokit, apiOptions);
+        request = patch(octokit.request.defaults(endpointDefaults), `.${namespaceName}.${apiName}()`);
+        request.endpoint = patch(request.endpoint, `.${namespaceName}.${apiName}.endpoint()`);
+        request.endpoint.merge = patch(request.endpoint.merge, `.${namespaceName}.${apiName}.endpoint.merge()`);
       }
-    } else {
-      // had matches
-      var m = Object.keys(matches)
-      if (nou)
-        all.push.apply(all, m)
-      else
-        m.forEach(function (m) {
-          all[m] = true
-        })
-    }
-  }
 
-  if (!nou)
-    all = Object.keys(all)
+      if (apiOptions.deprecated) {
+        octokit[namespaceName][apiName] = Object.assign(function deprecatedEndpointMethod() {
+          octokit.log.warn(new deprecation.Deprecation(`[@octokit/rest] ${apiOptions.deprecated}`));
+          octokit[namespaceName][apiName] = request;
+          return request.apply(null, arguments);
+        }, request);
+        return;
+      }
 
-  if (!self.nosort)
-    all = all.sort(self.nocase ? alphasorti : alphasort)
-
-  // at *some* point we statted all of these
-  if (self.mark) {
-    for (var i = 0; i < all.length; i++) {
-      all[i] = self._mark(all[i])
-    }
-    if (self.nodir) {
-      all = all.filter(function (e) {
-        var notDir = !(/\/$/.test(e))
-        var c = self.cache[e] || self.cache[makeAbs(self, e)]
-        if (notDir && c)
-          notDir = c !== 'DIR' && !Array.isArray(c)
-        return notDir
-      })
-    }
-  }
-
-  if (self.ignore.length)
-    all = all.filter(function(m) {
-      return !isIgnored(self, m)
-    })
-
-  self.found = all
+      octokit[namespaceName][apiName] = request;
+    });
+  });
 }
 
-function mark (self, p) {
-  var abs = makeAbs(self, p)
-  var c = self.cache[abs]
-  var m = p
-  if (c) {
-    var isDir = c === 'DIR' || Array.isArray(c)
-    var slash = p.slice(-1) === '/'
+function patchForDeprecation(octokit, apiOptions, method, methodName) {
+  const patchedMethod = options => {
+    options = Object.assign({}, options);
+    Object.keys(options).forEach(key => {
+      if (apiOptions.params[key] && apiOptions.params[key].deprecated) {
+        const aliasKey = apiOptions.params[key].alias;
+        octokit.log.warn(new deprecation.Deprecation(`[@octokit/rest] "${key}" parameter is deprecated for "${methodName}". Use "${aliasKey}" instead`));
 
-    if (isDir && !slash)
-      m += '/'
-    else if (!isDir && slash)
-      m = m.slice(0, -1)
+        if (!(aliasKey in options)) {
+          options[aliasKey] = options[key];
+        }
 
-    if (m !== p) {
-      var mabs = makeAbs(self, m)
-      self.statCache[mabs] = self.statCache[abs]
-      self.cache[mabs] = self.cache[abs]
-    }
-  }
+        delete options[key];
+      }
+    });
+    return method(options);
+  };
 
-  return m
+  Object.keys(method).forEach(key => {
+    patchedMethod[key] = method[key];
+  });
+  return patchedMethod;
 }
 
-// lotta situps...
-function makeAbs (self, f) {
-  var abs = f
-  if (f.charAt(0) === '/') {
-    abs = path.join(self.root, f)
-  } else if (isAbsolute(f) || f === '') {
-    abs = f
-  } else if (self.changedCwd) {
-    abs = path.resolve(self.cwd, f)
-  } else {
-    abs = path.resolve(f)
-  }
+/**
+ * This plugin is a 1:1 copy of internal @octokit/rest plugins. The primary
+ * goal is to rebuild @octokit/rest on top of @octokit/core. Once that is
+ * done, we will remove the registerEndpoints methods and return the methods
+ * directly as with the other plugins. At that point we will also remove the
+ * legacy workarounds and deprecations.
+ *
+ * See the plan at
+ * https://github.com/octokit/plugin-rest-endpoint-methods.js/pull/1
+ */
 
-  if (process.platform === 'win32')
-    abs = abs.replace(/\\/g, '/')
+function restEndpointMethods(octokit) {
+  // @ts-ignore
+  octokit.registerEndpoints = registerEndpoints.bind(null, octokit);
+  registerEndpoints(octokit, endpointsByScope); // Aliasing scopes for backward compatibility
+  // See https://github.com/octokit/rest.js/pull/1134
 
-  return abs
+  [["gitdata", "git"], ["authorization", "oauthAuthorizations"], ["pullRequests", "pulls"]].forEach(([deprecatedScope, scope]) => {
+    Object.defineProperty(octokit, deprecatedScope, {
+      get() {
+        octokit.log.warn( // @ts-ignore
+        new deprecation.Deprecation(`[@octokit/plugin-rest-endpoint-methods] "octokit.${deprecatedScope}.*" methods are deprecated, use "octokit.${scope}.*" instead`)); // @ts-ignore
+
+        return octokit[scope];
+      }
+
+    });
+  });
+  return {};
 }
+restEndpointMethods.VERSION = VERSION;
 
-
-// Return true, if pattern ends with globstar '**', for the accompanying parent directory.
-// Ex:- If node_modules/** is the pattern, add 'node_modules' to ignore list along with it's contents
-function isIgnored (self, path) {
-  if (!self.ignore.length)
-    return false
-
-  return self.ignore.some(function(item) {
-    return item.matcher.match(path) || !!(item.gmatcher && item.gmatcher.match(path))
-  })
-}
-
-function childrenIgnored (self, path) {
-  if (!self.ignore.length)
-    return false
-
-  return self.ignore.some(function(item) {
-    return !!(item.gmatcher && item.gmatcher.match(path))
-  })
-}
+exports.restEndpointMethods = restEndpointMethods;
+//# sourceMappingURL=index.js.map
 
 
 /***/ }),
@@ -868,6 +14081,51 @@ module.exports = {
     verifyENOENTSync,
     notFoundError,
 };
+
+
+/***/ }),
+
+/***/ 22:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = getPage
+
+const deprecate = __webpack_require__(307)
+const getPageLinks = __webpack_require__(327)
+const HttpError = __webpack_require__(504)
+
+function getPage (octokit, link, which, headers) {
+  deprecate(`octokit.get${which.charAt(0).toUpperCase() + which.slice(1)}Page() – You can use octokit.paginate or async iterators instead: https://github.com/octokit/rest.js#pagination.`)
+  const url = getPageLinks(link)[which]
+
+  if (!url) {
+    const urlError = new HttpError(`No ${which} page found`, 404)
+    return Promise.reject(urlError)
+  }
+
+  const requestOptions = {
+    url,
+    headers: applyAcceptHeader(link, headers)
+  }
+
+  const promise = octokit.request(requestOptions)
+
+  return promise
+}
+
+function applyAcceptHeader (res, headers) {
+  const previous = res.headers && res.headers['x-github-media-type']
+
+  if (!previous || (headers && headers.accept)) {
+    return headers
+  }
+  headers = headers || {}
+  headers.accept = 'application/vnd.' + previous
+    .replace('; param=', '.')
+    .replace('; format=', '+')
+
+  return headers
+}
 
 
 /***/ }),
@@ -1003,7 +14261,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const core = __importStar(__webpack_require__(827));
-const upload_specification_1 = __webpack_require__(148);
+const upload_specification_1 = __webpack_require__(420);
 const upload_http_client_1 = __webpack_require__(79);
 const utils_1 = __webpack_require__(435);
 const download_http_client_1 = __webpack_require__(549);
@@ -1359,6 +14617,50 @@ module.exports = function (str) {
 		bin + (arg ? ' ' + arg : '')
 	);
 };
+
+
+/***/ }),
+
+/***/ 46:
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+
+Object.defineProperty(exports, '__esModule', { value: true });
+
+function _interopDefault (ex) { return (ex && (typeof ex === 'object') && 'default' in ex) ? ex['default'] : ex; }
+
+var osName = _interopDefault(__webpack_require__(50));
+
+function getUserAgent() {
+  try {
+    return `Node.js/${process.version.substr(1)} (${osName()}; ${process.arch})`;
+  } catch (error) {
+    if (/wmic os get Caption/.test(error.message)) {
+      return "Windows <version undetectable>";
+    }
+
+    throw error;
+  }
+}
+
+exports.getUserAgent = getUserAgent;
+//# sourceMappingURL=index.js.map
+
+
+/***/ }),
+
+/***/ 48:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = paginatePlugin;
+
+const { paginateRest } = __webpack_require__(17);
+
+function paginatePlugin(octokit) {
+  Object.assign(octokit, paginateRest(octokit));
+}
 
 
 /***/ }),
@@ -2529,6 +15831,13 @@ exports.UploadHttpClient = UploadHttpClient;
 
 /***/ }),
 
+/***/ 83:
+/***/ (function(module) {
+
+module.exports = {"_from":"@octokit/rest@^16.43.1","_id":"@octokit/rest@16.43.1","_inBundle":false,"_integrity":"sha512-gfFKwRT/wFxq5qlNjnW2dh+qh74XgTQ2B179UX5K1HYCluioWj8Ndbgqw2PVqa1NnVJkGHp2ovMpVn/DImlmkw==","_location":"/@actions/github/@octokit/rest","_phantomChildren":{},"_requested":{"type":"range","registry":true,"raw":"@octokit/rest@^16.43.1","name":"@octokit/rest","escapedName":"@octokit%2frest","scope":"@octokit","rawSpec":"^16.43.1","saveSpec":null,"fetchSpec":"^16.43.1"},"_requiredBy":["/@actions/github"],"_resolved":"https://registry.npmjs.org/@octokit/rest/-/rest-16.43.1.tgz","_shasum":"3b11e7d1b1ac2bbeeb23b08a17df0b20947eda6b","_spec":"@octokit/rest@^16.43.1","_where":"/Users/ericwf/other-workspace/libcxx-actions/javascript-action/node_modules/@actions/github","author":{"name":"Gregor Martynus","url":"https://github.com/gr2m"},"bugs":{"url":"https://github.com/octokit/rest.js/issues"},"bundleDependencies":false,"bundlesize":[{"path":"./dist/octokit-rest.min.js.gz","maxSize":"33 kB"}],"contributors":[{"name":"Mike de Boer","email":"info@mikedeboer.nl"},{"name":"Fabian Jakobs","email":"fabian@c9.io"},{"name":"Joe Gallo","email":"joe@brassafrax.com"},{"name":"Gregor Martynus","url":"https://github.com/gr2m"}],"dependencies":{"@octokit/auth-token":"^2.4.0","@octokit/plugin-paginate-rest":"^1.1.1","@octokit/plugin-request-log":"^1.0.0","@octokit/plugin-rest-endpoint-methods":"2.4.0","@octokit/request":"^5.2.0","@octokit/request-error":"^1.0.2","atob-lite":"^2.0.0","before-after-hook":"^2.0.0","btoa-lite":"^1.0.0","deprecation":"^2.0.0","lodash.get":"^4.4.2","lodash.set":"^4.3.2","lodash.uniq":"^4.5.0","octokit-pagination-methods":"^1.1.0","once":"^1.4.0","universal-user-agent":"^4.0.0"},"deprecated":false,"description":"GitHub REST API client for Node.js","devDependencies":{"@gimenete/type-writer":"^0.1.3","@octokit/auth":"^1.1.1","@octokit/fixtures-server":"^5.0.6","@octokit/graphql":"^4.2.0","@types/node":"^13.1.0","bundlesize":"^0.18.0","chai":"^4.1.2","compression-webpack-plugin":"^3.1.0","cypress":"^3.0.0","glob":"^7.1.2","http-proxy-agent":"^4.0.0","lodash.camelcase":"^4.3.0","lodash.merge":"^4.6.1","lodash.upperfirst":"^4.3.1","lolex":"^5.1.2","mkdirp":"^1.0.0","mocha":"^7.0.1","mustache":"^4.0.0","nock":"^11.3.3","npm-run-all":"^4.1.2","nyc":"^15.0.0","prettier":"^1.14.2","proxy":"^1.0.0","semantic-release":"^17.0.0","sinon":"^8.0.0","sinon-chai":"^3.0.0","sort-keys":"^4.0.0","string-to-arraybuffer":"^1.0.0","string-to-jsdoc-comment":"^1.0.0","typescript":"^3.3.1","webpack":"^4.0.0","webpack-bundle-analyzer":"^3.0.0","webpack-cli":"^3.0.0"},"files":["index.js","index.d.ts","lib","plugins"],"homepage":"https://github.com/octokit/rest.js#readme","keywords":["octokit","github","rest","api-client"],"license":"MIT","name":"@octokit/rest","nyc":{"ignore":["test"]},"publishConfig":{"access":"public"},"release":{"publish":["@semantic-release/npm",{"path":"@semantic-release/github","assets":["dist/*","!dist/*.map.gz"]}]},"repository":{"type":"git","url":"git+https://github.com/octokit/rest.js.git"},"scripts":{"build":"npm-run-all build:*","build:browser":"npm-run-all build:browser:*","build:browser:development":"webpack --mode development --entry . --output-library=Octokit --output=./dist/octokit-rest.js --profile --json > dist/bundle-stats.json","build:browser:production":"webpack --mode production --entry . --plugin=compression-webpack-plugin --output-library=Octokit --output-path=./dist --output-filename=octokit-rest.min.js --devtool source-map","build:ts":"npm run -s update-endpoints:typescript","coverage":"nyc report --reporter=html && open coverage/index.html","generate-bundle-report":"webpack-bundle-analyzer dist/bundle-stats.json --mode=static --no-open --report dist/bundle-report.html","lint":"prettier --check '{lib,plugins,scripts,test}/**/*.{js,json,ts}' 'docs/*.{js,json}' 'docs/src/**/*' index.js README.md package.json","lint:fix":"prettier --write '{lib,plugins,scripts,test}/**/*.{js,json,ts}' 'docs/*.{js,json}' 'docs/src/**/*' index.js README.md package.json","postvalidate:ts":"tsc --noEmit --target es6 test/typescript-validate.ts","prebuild:browser":"mkdirp dist/","pretest":"npm run -s lint","prevalidate:ts":"npm run -s build:ts","start-fixtures-server":"octokit-fixtures-server","test":"nyc mocha test/mocha-node-setup.js \"test/*/**/*-test.js\"","test:browser":"cypress run --browser chrome","update-endpoints":"npm-run-all update-endpoints:*","update-endpoints:fetch-json":"node scripts/update-endpoints/fetch-json","update-endpoints:typescript":"node scripts/update-endpoints/typescript","validate:ts":"tsc --target es6 --noImplicitAny index.d.ts"},"types":"index.d.ts","version":"16.43.1"};
+
+/***/ }),
+
 /***/ 87:
 /***/ (function(module) {
 
@@ -2894,14 +16203,14 @@ globSync.GlobSync = GlobSync
 
 var fs = __webpack_require__(747)
 var rp = __webpack_require__(544)
-var minimatch = __webpack_require__(689)
+var minimatch = __webpack_require__(750)
 var Minimatch = minimatch.Minimatch
 var Glob = __webpack_require__(696).Glob
 var util = __webpack_require__(669)
 var path = __webpack_require__(277)
 var assert = __webpack_require__(357)
 var isAbsolute = __webpack_require__(829)
-var common = __webpack_require__(18)
+var common = __webpack_require__(214)
 var alphasort = common.alphasort
 var alphasorti = common.alphasorti
 var setopts = common.setopts
@@ -4717,85 +18026,88 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-const fs = __importStar(__webpack_require__(747));
-const core_1 = __webpack_require__(827);
-const path_1 = __webpack_require__(277);
-const utils_1 = __webpack_require__(435);
-/**
- * Creates a specification that describes how each file that is part of the artifact will be uploaded
- * @param artifactName the name of the artifact being uploaded. Used during upload to denote where the artifact is stored on the server
- * @param rootDirectory an absolute file path that denotes the path that should be removed from the beginning of each artifact file
- * @param artifactFiles a list of absolute file paths that denote what should be uploaded as part of the artifact
- */
-function getUploadSpecification(artifactName, rootDirectory, artifactFiles) {
-    utils_1.checkArtifactName(artifactName);
-    const specifications = [];
-    if (!fs.existsSync(rootDirectory)) {
-        throw new Error(`Provided rootDirectory ${rootDirectory} does not exist`);
+// Originally pulled from https://github.com/JasonEtco/actions-toolkit/blob/master/src/github.ts
+const graphql_1 = __webpack_require__(71);
+const rest_1 = __webpack_require__(606);
+const Context = __importStar(__webpack_require__(390));
+const httpClient = __importStar(__webpack_require__(7));
+// We need this in order to extend Octokit
+rest_1.Octokit.prototype = new rest_1.Octokit();
+exports.context = new Context.Context();
+class GitHub extends rest_1.Octokit {
+    constructor(token, opts) {
+        super(GitHub.getOctokitOptions(GitHub.disambiguate(token, opts)));
+        this.graphql = GitHub.getGraphQL(GitHub.disambiguate(token, opts));
     }
-    if (!fs.lstatSync(rootDirectory).isDirectory()) {
-        throw new Error(`Provided rootDirectory ${rootDirectory} is not a valid directory`);
+    /**
+     * Disambiguates the constructor overload parameters
+     */
+    static disambiguate(token, opts) {
+        return [
+            typeof token === 'string' ? token : '',
+            typeof token === 'object' ? token : opts || {}
+        ];
     }
-    // Normalize and resolve, this allows for either absolute or relative paths to be used
-    rootDirectory = path_1.normalize(rootDirectory);
-    rootDirectory = path_1.resolve(rootDirectory);
-    /*
-       Example to demonstrate behavior
-       
-       Input:
-         artifactName: my-artifact
-         rootDirectory: '/home/user/files/plz-upload'
-         artifactFiles: [
-           '/home/user/files/plz-upload/file1.txt',
-           '/home/user/files/plz-upload/file2.txt',
-           '/home/user/files/plz-upload/dir/file3.txt'
-         ]
-       
-       Output:
-         specifications: [
-           ['/home/user/files/plz-upload/file1.txt', 'my-artifact/file1.txt'],
-           ['/home/user/files/plz-upload/file1.txt', 'my-artifact/file2.txt'],
-           ['/home/user/files/plz-upload/file1.txt', 'my-artifact/dir/file3.txt']
-         ]
-    */
-    for (let file of artifactFiles) {
-        if (!fs.existsSync(file)) {
-            throw new Error(`File ${file} does not exist`);
+    static getOctokitOptions(args) {
+        const token = args[0];
+        const options = Object.assign({}, args[1]); // Shallow clone - don't mutate the object provided by the caller
+        // Auth
+        const auth = GitHub.getAuthString(token, options);
+        if (auth) {
+            options.auth = auth;
         }
-        if (!fs.lstatSync(file).isDirectory()) {
-            // Normalize and resolve, this allows for either absolute or relative paths to be used
-            file = path_1.normalize(file);
-            file = path_1.resolve(file);
-            if (!file.startsWith(rootDirectory)) {
-                throw new Error(`The rootDirectory: ${rootDirectory} is not a parent directory of the file: ${file}`);
+        // Proxy
+        const agent = GitHub.getProxyAgent(options);
+        if (agent) {
+            // Shallow clone - don't mutate the object provided by the caller
+            options.request = options.request ? Object.assign({}, options.request) : {};
+            // Set the agent
+            options.request.agent = agent;
+        }
+        return options;
+    }
+    static getGraphQL(args) {
+        const defaults = {};
+        const token = args[0];
+        const options = args[1];
+        // Authorization
+        const auth = this.getAuthString(token, options);
+        if (auth) {
+            defaults.headers = {
+                authorization: auth
+            };
+        }
+        // Proxy
+        const agent = GitHub.getProxyAgent(options);
+        if (agent) {
+            defaults.request = { agent };
+        }
+        return graphql_1.graphql.defaults(defaults);
+    }
+    static getAuthString(token, options) {
+        // Validate args
+        if (!token && !options.auth) {
+            throw new Error('Parameter token or opts.auth is required');
+        }
+        else if (token && options.auth) {
+            throw new Error('Parameters token and opts.auth may not both be specified');
+        }
+        return typeof options.auth === 'string' ? options.auth : `token ${token}`;
+    }
+    static getProxyAgent(options) {
+        var _a;
+        if (!((_a = options.request) === null || _a === void 0 ? void 0 : _a.agent)) {
+            const serverUrl = 'https://api.github.com';
+            if (httpClient.getProxyUrl(serverUrl)) {
+                const hc = new httpClient.HttpClient();
+                return hc.getAgent(serverUrl);
             }
-            // Check for forbidden characters in file paths that will be rejected during upload
-            const uploadPath = file.replace(rootDirectory, '');
-            utils_1.checkArtifactFilePath(uploadPath);
-            /*
-              uploadFilePath denotes where the file will be uploaded in the file container on the server. During a run, if multiple artifacts are uploaded, they will all
-              be saved in the same container. The artifact name is used as the root directory in the container to separate and distinguish uploaded artifacts
-      
-              path.join handles all the following cases and would return 'artifact-name/file-to-upload.txt
-                join('artifact-name/', 'file-to-upload.txt')
-                join('artifact-name/', '/file-to-upload.txt')
-                join('artifact-name', 'file-to-upload.txt')
-                join('artifact-name', '/file-to-upload.txt')
-            */
-            specifications.push({
-                absoluteFilePath: file,
-                uploadFilePath: path_1.join(artifactName, uploadPath)
-            });
         }
-        else {
-            // Directories are rejected by the server during upload
-            core_1.debug(`Removing ${file} from rawSearchResults because it is a directory`);
-        }
+        return undefined;
     }
-    return specifications;
 }
-exports.getUploadSpecification = getUploadSpecification;
-//# sourceMappingURL=upload-specification.js.map
+exports.GitHub = GitHub;
+//# sourceMappingURL=github.js.map
 
 /***/ }),
 
@@ -4851,6 +18163,925 @@ function isPlainObject(o) {
 }
 
 module.exports = isPlainObject;
+
+
+/***/ }),
+
+/***/ 162:
+/***/ (function(module) {
+
+/**
+ * lodash (Custom Build) <https://lodash.com/>
+ * Build: `lodash modularize exports="npm" -o ./`
+ * Copyright jQuery Foundation and other contributors <https://jquery.org/>
+ * Released under MIT license <https://lodash.com/license>
+ * Based on Underscore.js 1.8.3 <http://underscorejs.org/LICENSE>
+ * Copyright Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
+ */
+
+/** Used as the size to enable large array optimizations. */
+var LARGE_ARRAY_SIZE = 200;
+
+/** Used to stand-in for `undefined` hash values. */
+var HASH_UNDEFINED = '__lodash_hash_undefined__';
+
+/** Used as references for various `Number` constants. */
+var INFINITY = 1 / 0;
+
+/** `Object#toString` result references. */
+var funcTag = '[object Function]',
+    genTag = '[object GeneratorFunction]';
+
+/**
+ * Used to match `RegExp`
+ * [syntax characters](http://ecma-international.org/ecma-262/7.0/#sec-patterns).
+ */
+var reRegExpChar = /[\\^$.*+?()[\]{}|]/g;
+
+/** Used to detect host constructors (Safari). */
+var reIsHostCtor = /^\[object .+?Constructor\]$/;
+
+/** Detect free variable `global` from Node.js. */
+var freeGlobal = typeof global == 'object' && global && global.Object === Object && global;
+
+/** Detect free variable `self`. */
+var freeSelf = typeof self == 'object' && self && self.Object === Object && self;
+
+/** Used as a reference to the global object. */
+var root = freeGlobal || freeSelf || Function('return this')();
+
+/**
+ * A specialized version of `_.includes` for arrays without support for
+ * specifying an index to search from.
+ *
+ * @private
+ * @param {Array} [array] The array to inspect.
+ * @param {*} target The value to search for.
+ * @returns {boolean} Returns `true` if `target` is found, else `false`.
+ */
+function arrayIncludes(array, value) {
+  var length = array ? array.length : 0;
+  return !!length && baseIndexOf(array, value, 0) > -1;
+}
+
+/**
+ * This function is like `arrayIncludes` except that it accepts a comparator.
+ *
+ * @private
+ * @param {Array} [array] The array to inspect.
+ * @param {*} target The value to search for.
+ * @param {Function} comparator The comparator invoked per element.
+ * @returns {boolean} Returns `true` if `target` is found, else `false`.
+ */
+function arrayIncludesWith(array, value, comparator) {
+  var index = -1,
+      length = array ? array.length : 0;
+
+  while (++index < length) {
+    if (comparator(value, array[index])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The base implementation of `_.findIndex` and `_.findLastIndex` without
+ * support for iteratee shorthands.
+ *
+ * @private
+ * @param {Array} array The array to inspect.
+ * @param {Function} predicate The function invoked per iteration.
+ * @param {number} fromIndex The index to search from.
+ * @param {boolean} [fromRight] Specify iterating from right to left.
+ * @returns {number} Returns the index of the matched value, else `-1`.
+ */
+function baseFindIndex(array, predicate, fromIndex, fromRight) {
+  var length = array.length,
+      index = fromIndex + (fromRight ? 1 : -1);
+
+  while ((fromRight ? index-- : ++index < length)) {
+    if (predicate(array[index], index, array)) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The base implementation of `_.indexOf` without `fromIndex` bounds checks.
+ *
+ * @private
+ * @param {Array} array The array to inspect.
+ * @param {*} value The value to search for.
+ * @param {number} fromIndex The index to search from.
+ * @returns {number} Returns the index of the matched value, else `-1`.
+ */
+function baseIndexOf(array, value, fromIndex) {
+  if (value !== value) {
+    return baseFindIndex(array, baseIsNaN, fromIndex);
+  }
+  var index = fromIndex - 1,
+      length = array.length;
+
+  while (++index < length) {
+    if (array[index] === value) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The base implementation of `_.isNaN` without support for number objects.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is `NaN`, else `false`.
+ */
+function baseIsNaN(value) {
+  return value !== value;
+}
+
+/**
+ * Checks if a cache value for `key` exists.
+ *
+ * @private
+ * @param {Object} cache The cache to query.
+ * @param {string} key The key of the entry to check.
+ * @returns {boolean} Returns `true` if an entry for `key` exists, else `false`.
+ */
+function cacheHas(cache, key) {
+  return cache.has(key);
+}
+
+/**
+ * Gets the value at `key` of `object`.
+ *
+ * @private
+ * @param {Object} [object] The object to query.
+ * @param {string} key The key of the property to get.
+ * @returns {*} Returns the property value.
+ */
+function getValue(object, key) {
+  return object == null ? undefined : object[key];
+}
+
+/**
+ * Checks if `value` is a host object in IE < 9.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a host object, else `false`.
+ */
+function isHostObject(value) {
+  // Many host objects are `Object` objects that can coerce to strings
+  // despite having improperly defined `toString` methods.
+  var result = false;
+  if (value != null && typeof value.toString != 'function') {
+    try {
+      result = !!(value + '');
+    } catch (e) {}
+  }
+  return result;
+}
+
+/**
+ * Converts `set` to an array of its values.
+ *
+ * @private
+ * @param {Object} set The set to convert.
+ * @returns {Array} Returns the values.
+ */
+function setToArray(set) {
+  var index = -1,
+      result = Array(set.size);
+
+  set.forEach(function(value) {
+    result[++index] = value;
+  });
+  return result;
+}
+
+/** Used for built-in method references. */
+var arrayProto = Array.prototype,
+    funcProto = Function.prototype,
+    objectProto = Object.prototype;
+
+/** Used to detect overreaching core-js shims. */
+var coreJsData = root['__core-js_shared__'];
+
+/** Used to detect methods masquerading as native. */
+var maskSrcKey = (function() {
+  var uid = /[^.]+$/.exec(coreJsData && coreJsData.keys && coreJsData.keys.IE_PROTO || '');
+  return uid ? ('Symbol(src)_1.' + uid) : '';
+}());
+
+/** Used to resolve the decompiled source of functions. */
+var funcToString = funcProto.toString;
+
+/** Used to check objects for own properties. */
+var hasOwnProperty = objectProto.hasOwnProperty;
+
+/**
+ * Used to resolve the
+ * [`toStringTag`](http://ecma-international.org/ecma-262/7.0/#sec-object.prototype.tostring)
+ * of values.
+ */
+var objectToString = objectProto.toString;
+
+/** Used to detect if a method is native. */
+var reIsNative = RegExp('^' +
+  funcToString.call(hasOwnProperty).replace(reRegExpChar, '\\$&')
+  .replace(/hasOwnProperty|(function).*?(?=\\\()| for .+?(?=\\\])/g, '$1.*?') + '$'
+);
+
+/** Built-in value references. */
+var splice = arrayProto.splice;
+
+/* Built-in method references that are verified to be native. */
+var Map = getNative(root, 'Map'),
+    Set = getNative(root, 'Set'),
+    nativeCreate = getNative(Object, 'create');
+
+/**
+ * Creates a hash object.
+ *
+ * @private
+ * @constructor
+ * @param {Array} [entries] The key-value pairs to cache.
+ */
+function Hash(entries) {
+  var index = -1,
+      length = entries ? entries.length : 0;
+
+  this.clear();
+  while (++index < length) {
+    var entry = entries[index];
+    this.set(entry[0], entry[1]);
+  }
+}
+
+/**
+ * Removes all key-value entries from the hash.
+ *
+ * @private
+ * @name clear
+ * @memberOf Hash
+ */
+function hashClear() {
+  this.__data__ = nativeCreate ? nativeCreate(null) : {};
+}
+
+/**
+ * Removes `key` and its value from the hash.
+ *
+ * @private
+ * @name delete
+ * @memberOf Hash
+ * @param {Object} hash The hash to modify.
+ * @param {string} key The key of the value to remove.
+ * @returns {boolean} Returns `true` if the entry was removed, else `false`.
+ */
+function hashDelete(key) {
+  return this.has(key) && delete this.__data__[key];
+}
+
+/**
+ * Gets the hash value for `key`.
+ *
+ * @private
+ * @name get
+ * @memberOf Hash
+ * @param {string} key The key of the value to get.
+ * @returns {*} Returns the entry value.
+ */
+function hashGet(key) {
+  var data = this.__data__;
+  if (nativeCreate) {
+    var result = data[key];
+    return result === HASH_UNDEFINED ? undefined : result;
+  }
+  return hasOwnProperty.call(data, key) ? data[key] : undefined;
+}
+
+/**
+ * Checks if a hash value for `key` exists.
+ *
+ * @private
+ * @name has
+ * @memberOf Hash
+ * @param {string} key The key of the entry to check.
+ * @returns {boolean} Returns `true` if an entry for `key` exists, else `false`.
+ */
+function hashHas(key) {
+  var data = this.__data__;
+  return nativeCreate ? data[key] !== undefined : hasOwnProperty.call(data, key);
+}
+
+/**
+ * Sets the hash `key` to `value`.
+ *
+ * @private
+ * @name set
+ * @memberOf Hash
+ * @param {string} key The key of the value to set.
+ * @param {*} value The value to set.
+ * @returns {Object} Returns the hash instance.
+ */
+function hashSet(key, value) {
+  var data = this.__data__;
+  data[key] = (nativeCreate && value === undefined) ? HASH_UNDEFINED : value;
+  return this;
+}
+
+// Add methods to `Hash`.
+Hash.prototype.clear = hashClear;
+Hash.prototype['delete'] = hashDelete;
+Hash.prototype.get = hashGet;
+Hash.prototype.has = hashHas;
+Hash.prototype.set = hashSet;
+
+/**
+ * Creates an list cache object.
+ *
+ * @private
+ * @constructor
+ * @param {Array} [entries] The key-value pairs to cache.
+ */
+function ListCache(entries) {
+  var index = -1,
+      length = entries ? entries.length : 0;
+
+  this.clear();
+  while (++index < length) {
+    var entry = entries[index];
+    this.set(entry[0], entry[1]);
+  }
+}
+
+/**
+ * Removes all key-value entries from the list cache.
+ *
+ * @private
+ * @name clear
+ * @memberOf ListCache
+ */
+function listCacheClear() {
+  this.__data__ = [];
+}
+
+/**
+ * Removes `key` and its value from the list cache.
+ *
+ * @private
+ * @name delete
+ * @memberOf ListCache
+ * @param {string} key The key of the value to remove.
+ * @returns {boolean} Returns `true` if the entry was removed, else `false`.
+ */
+function listCacheDelete(key) {
+  var data = this.__data__,
+      index = assocIndexOf(data, key);
+
+  if (index < 0) {
+    return false;
+  }
+  var lastIndex = data.length - 1;
+  if (index == lastIndex) {
+    data.pop();
+  } else {
+    splice.call(data, index, 1);
+  }
+  return true;
+}
+
+/**
+ * Gets the list cache value for `key`.
+ *
+ * @private
+ * @name get
+ * @memberOf ListCache
+ * @param {string} key The key of the value to get.
+ * @returns {*} Returns the entry value.
+ */
+function listCacheGet(key) {
+  var data = this.__data__,
+      index = assocIndexOf(data, key);
+
+  return index < 0 ? undefined : data[index][1];
+}
+
+/**
+ * Checks if a list cache value for `key` exists.
+ *
+ * @private
+ * @name has
+ * @memberOf ListCache
+ * @param {string} key The key of the entry to check.
+ * @returns {boolean} Returns `true` if an entry for `key` exists, else `false`.
+ */
+function listCacheHas(key) {
+  return assocIndexOf(this.__data__, key) > -1;
+}
+
+/**
+ * Sets the list cache `key` to `value`.
+ *
+ * @private
+ * @name set
+ * @memberOf ListCache
+ * @param {string} key The key of the value to set.
+ * @param {*} value The value to set.
+ * @returns {Object} Returns the list cache instance.
+ */
+function listCacheSet(key, value) {
+  var data = this.__data__,
+      index = assocIndexOf(data, key);
+
+  if (index < 0) {
+    data.push([key, value]);
+  } else {
+    data[index][1] = value;
+  }
+  return this;
+}
+
+// Add methods to `ListCache`.
+ListCache.prototype.clear = listCacheClear;
+ListCache.prototype['delete'] = listCacheDelete;
+ListCache.prototype.get = listCacheGet;
+ListCache.prototype.has = listCacheHas;
+ListCache.prototype.set = listCacheSet;
+
+/**
+ * Creates a map cache object to store key-value pairs.
+ *
+ * @private
+ * @constructor
+ * @param {Array} [entries] The key-value pairs to cache.
+ */
+function MapCache(entries) {
+  var index = -1,
+      length = entries ? entries.length : 0;
+
+  this.clear();
+  while (++index < length) {
+    var entry = entries[index];
+    this.set(entry[0], entry[1]);
+  }
+}
+
+/**
+ * Removes all key-value entries from the map.
+ *
+ * @private
+ * @name clear
+ * @memberOf MapCache
+ */
+function mapCacheClear() {
+  this.__data__ = {
+    'hash': new Hash,
+    'map': new (Map || ListCache),
+    'string': new Hash
+  };
+}
+
+/**
+ * Removes `key` and its value from the map.
+ *
+ * @private
+ * @name delete
+ * @memberOf MapCache
+ * @param {string} key The key of the value to remove.
+ * @returns {boolean} Returns `true` if the entry was removed, else `false`.
+ */
+function mapCacheDelete(key) {
+  return getMapData(this, key)['delete'](key);
+}
+
+/**
+ * Gets the map value for `key`.
+ *
+ * @private
+ * @name get
+ * @memberOf MapCache
+ * @param {string} key The key of the value to get.
+ * @returns {*} Returns the entry value.
+ */
+function mapCacheGet(key) {
+  return getMapData(this, key).get(key);
+}
+
+/**
+ * Checks if a map value for `key` exists.
+ *
+ * @private
+ * @name has
+ * @memberOf MapCache
+ * @param {string} key The key of the entry to check.
+ * @returns {boolean} Returns `true` if an entry for `key` exists, else `false`.
+ */
+function mapCacheHas(key) {
+  return getMapData(this, key).has(key);
+}
+
+/**
+ * Sets the map `key` to `value`.
+ *
+ * @private
+ * @name set
+ * @memberOf MapCache
+ * @param {string} key The key of the value to set.
+ * @param {*} value The value to set.
+ * @returns {Object} Returns the map cache instance.
+ */
+function mapCacheSet(key, value) {
+  getMapData(this, key).set(key, value);
+  return this;
+}
+
+// Add methods to `MapCache`.
+MapCache.prototype.clear = mapCacheClear;
+MapCache.prototype['delete'] = mapCacheDelete;
+MapCache.prototype.get = mapCacheGet;
+MapCache.prototype.has = mapCacheHas;
+MapCache.prototype.set = mapCacheSet;
+
+/**
+ *
+ * Creates an array cache object to store unique values.
+ *
+ * @private
+ * @constructor
+ * @param {Array} [values] The values to cache.
+ */
+function SetCache(values) {
+  var index = -1,
+      length = values ? values.length : 0;
+
+  this.__data__ = new MapCache;
+  while (++index < length) {
+    this.add(values[index]);
+  }
+}
+
+/**
+ * Adds `value` to the array cache.
+ *
+ * @private
+ * @name add
+ * @memberOf SetCache
+ * @alias push
+ * @param {*} value The value to cache.
+ * @returns {Object} Returns the cache instance.
+ */
+function setCacheAdd(value) {
+  this.__data__.set(value, HASH_UNDEFINED);
+  return this;
+}
+
+/**
+ * Checks if `value` is in the array cache.
+ *
+ * @private
+ * @name has
+ * @memberOf SetCache
+ * @param {*} value The value to search for.
+ * @returns {number} Returns `true` if `value` is found, else `false`.
+ */
+function setCacheHas(value) {
+  return this.__data__.has(value);
+}
+
+// Add methods to `SetCache`.
+SetCache.prototype.add = SetCache.prototype.push = setCacheAdd;
+SetCache.prototype.has = setCacheHas;
+
+/**
+ * Gets the index at which the `key` is found in `array` of key-value pairs.
+ *
+ * @private
+ * @param {Array} array The array to inspect.
+ * @param {*} key The key to search for.
+ * @returns {number} Returns the index of the matched value, else `-1`.
+ */
+function assocIndexOf(array, key) {
+  var length = array.length;
+  while (length--) {
+    if (eq(array[length][0], key)) {
+      return length;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The base implementation of `_.isNative` without bad shim checks.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a native function,
+ *  else `false`.
+ */
+function baseIsNative(value) {
+  if (!isObject(value) || isMasked(value)) {
+    return false;
+  }
+  var pattern = (isFunction(value) || isHostObject(value)) ? reIsNative : reIsHostCtor;
+  return pattern.test(toSource(value));
+}
+
+/**
+ * The base implementation of `_.uniqBy` without support for iteratee shorthands.
+ *
+ * @private
+ * @param {Array} array The array to inspect.
+ * @param {Function} [iteratee] The iteratee invoked per element.
+ * @param {Function} [comparator] The comparator invoked per element.
+ * @returns {Array} Returns the new duplicate free array.
+ */
+function baseUniq(array, iteratee, comparator) {
+  var index = -1,
+      includes = arrayIncludes,
+      length = array.length,
+      isCommon = true,
+      result = [],
+      seen = result;
+
+  if (comparator) {
+    isCommon = false;
+    includes = arrayIncludesWith;
+  }
+  else if (length >= LARGE_ARRAY_SIZE) {
+    var set = iteratee ? null : createSet(array);
+    if (set) {
+      return setToArray(set);
+    }
+    isCommon = false;
+    includes = cacheHas;
+    seen = new SetCache;
+  }
+  else {
+    seen = iteratee ? [] : result;
+  }
+  outer:
+  while (++index < length) {
+    var value = array[index],
+        computed = iteratee ? iteratee(value) : value;
+
+    value = (comparator || value !== 0) ? value : 0;
+    if (isCommon && computed === computed) {
+      var seenIndex = seen.length;
+      while (seenIndex--) {
+        if (seen[seenIndex] === computed) {
+          continue outer;
+        }
+      }
+      if (iteratee) {
+        seen.push(computed);
+      }
+      result.push(value);
+    }
+    else if (!includes(seen, computed, comparator)) {
+      if (seen !== result) {
+        seen.push(computed);
+      }
+      result.push(value);
+    }
+  }
+  return result;
+}
+
+/**
+ * Creates a set object of `values`.
+ *
+ * @private
+ * @param {Array} values The values to add to the set.
+ * @returns {Object} Returns the new set.
+ */
+var createSet = !(Set && (1 / setToArray(new Set([,-0]))[1]) == INFINITY) ? noop : function(values) {
+  return new Set(values);
+};
+
+/**
+ * Gets the data for `map`.
+ *
+ * @private
+ * @param {Object} map The map to query.
+ * @param {string} key The reference key.
+ * @returns {*} Returns the map data.
+ */
+function getMapData(map, key) {
+  var data = map.__data__;
+  return isKeyable(key)
+    ? data[typeof key == 'string' ? 'string' : 'hash']
+    : data.map;
+}
+
+/**
+ * Gets the native function at `key` of `object`.
+ *
+ * @private
+ * @param {Object} object The object to query.
+ * @param {string} key The key of the method to get.
+ * @returns {*} Returns the function if it's native, else `undefined`.
+ */
+function getNative(object, key) {
+  var value = getValue(object, key);
+  return baseIsNative(value) ? value : undefined;
+}
+
+/**
+ * Checks if `value` is suitable for use as unique object key.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is suitable, else `false`.
+ */
+function isKeyable(value) {
+  var type = typeof value;
+  return (type == 'string' || type == 'number' || type == 'symbol' || type == 'boolean')
+    ? (value !== '__proto__')
+    : (value === null);
+}
+
+/**
+ * Checks if `func` has its source masked.
+ *
+ * @private
+ * @param {Function} func The function to check.
+ * @returns {boolean} Returns `true` if `func` is masked, else `false`.
+ */
+function isMasked(func) {
+  return !!maskSrcKey && (maskSrcKey in func);
+}
+
+/**
+ * Converts `func` to its source code.
+ *
+ * @private
+ * @param {Function} func The function to process.
+ * @returns {string} Returns the source code.
+ */
+function toSource(func) {
+  if (func != null) {
+    try {
+      return funcToString.call(func);
+    } catch (e) {}
+    try {
+      return (func + '');
+    } catch (e) {}
+  }
+  return '';
+}
+
+/**
+ * Creates a duplicate-free version of an array, using
+ * [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
+ * for equality comparisons, in which only the first occurrence of each
+ * element is kept.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Array
+ * @param {Array} array The array to inspect.
+ * @returns {Array} Returns the new duplicate free array.
+ * @example
+ *
+ * _.uniq([2, 1, 2]);
+ * // => [2, 1]
+ */
+function uniq(array) {
+  return (array && array.length)
+    ? baseUniq(array)
+    : [];
+}
+
+/**
+ * Performs a
+ * [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
+ * comparison between two values to determine if they are equivalent.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to compare.
+ * @param {*} other The other value to compare.
+ * @returns {boolean} Returns `true` if the values are equivalent, else `false`.
+ * @example
+ *
+ * var object = { 'a': 1 };
+ * var other = { 'a': 1 };
+ *
+ * _.eq(object, object);
+ * // => true
+ *
+ * _.eq(object, other);
+ * // => false
+ *
+ * _.eq('a', 'a');
+ * // => true
+ *
+ * _.eq('a', Object('a'));
+ * // => false
+ *
+ * _.eq(NaN, NaN);
+ * // => true
+ */
+function eq(value, other) {
+  return value === other || (value !== value && other !== other);
+}
+
+/**
+ * Checks if `value` is classified as a `Function` object.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a function, else `false`.
+ * @example
+ *
+ * _.isFunction(_);
+ * // => true
+ *
+ * _.isFunction(/abc/);
+ * // => false
+ */
+function isFunction(value) {
+  // The use of `Object#toString` avoids issues with the `typeof` operator
+  // in Safari 8-9 which returns 'object' for typed array and other constructors.
+  var tag = isObject(value) ? objectToString.call(value) : '';
+  return tag == funcTag || tag == genTag;
+}
+
+/**
+ * Checks if `value` is the
+ * [language type](http://www.ecma-international.org/ecma-262/7.0/#sec-ecmascript-language-types)
+ * of `Object`. (e.g. arrays, functions, objects, regexes, `new Number(0)`, and `new String('')`)
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is an object, else `false`.
+ * @example
+ *
+ * _.isObject({});
+ * // => true
+ *
+ * _.isObject([1, 2, 3]);
+ * // => true
+ *
+ * _.isObject(_.noop);
+ * // => true
+ *
+ * _.isObject(null);
+ * // => false
+ */
+function isObject(value) {
+  var type = typeof value;
+  return !!value && (type == 'object' || type == 'function');
+}
+
+/**
+ * This method returns `undefined`.
+ *
+ * @static
+ * @memberOf _
+ * @since 2.3.0
+ * @category Util
+ * @example
+ *
+ * _.times(2, _.noop);
+ * // => [undefined, undefined]
+ */
+function noop() {
+  // No operation performed.
+}
+
+module.exports = uniq;
+
+
+/***/ }),
+
+/***/ 170:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = hasFirstPage
+
+const deprecate = __webpack_require__(307)
+const getPageLinks = __webpack_require__(327)
+
+function hasFirstPage (link) {
+  deprecate(`octokit.hasFirstPage() – You can use octokit.paginate or async iterators instead: https://github.com/octokit/rest.js#pagination.`)
+  return getPageLinks(link).first
+}
 
 
 /***/ }),
@@ -5397,6 +19628,253 @@ module.exports = require("https");
 
 /***/ }),
 
+/***/ 214:
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+exports.alphasort = alphasort
+exports.alphasorti = alphasorti
+exports.setopts = setopts
+exports.ownProp = ownProp
+exports.makeAbs = makeAbs
+exports.finish = finish
+exports.mark = mark
+exports.isIgnored = isIgnored
+exports.childrenIgnored = childrenIgnored
+
+function ownProp (obj, field) {
+  return Object.prototype.hasOwnProperty.call(obj, field)
+}
+
+var path = __webpack_require__(277)
+var minimatch = __webpack_require__(750)
+var isAbsolute = __webpack_require__(829)
+var Minimatch = minimatch.Minimatch
+
+function alphasorti (a, b) {
+  return a.toLowerCase().localeCompare(b.toLowerCase())
+}
+
+function alphasort (a, b) {
+  return a.localeCompare(b)
+}
+
+function setupIgnores (self, options) {
+  self.ignore = options.ignore || []
+
+  if (!Array.isArray(self.ignore))
+    self.ignore = [self.ignore]
+
+  if (self.ignore.length) {
+    self.ignore = self.ignore.map(ignoreMap)
+  }
+}
+
+// ignore patterns are always in dot:true mode.
+function ignoreMap (pattern) {
+  var gmatcher = null
+  if (pattern.slice(-3) === '/**') {
+    var gpattern = pattern.replace(/(\/\*\*)+$/, '')
+    gmatcher = new Minimatch(gpattern, { dot: true })
+  }
+
+  return {
+    matcher: new Minimatch(pattern, { dot: true }),
+    gmatcher: gmatcher
+  }
+}
+
+function setopts (self, pattern, options) {
+  if (!options)
+    options = {}
+
+  // base-matching: just use globstar for that.
+  if (options.matchBase && -1 === pattern.indexOf("/")) {
+    if (options.noglobstar) {
+      throw new Error("base matching requires globstar")
+    }
+    pattern = "**/" + pattern
+  }
+
+  self.silent = !!options.silent
+  self.pattern = pattern
+  self.strict = options.strict !== false
+  self.realpath = !!options.realpath
+  self.realpathCache = options.realpathCache || Object.create(null)
+  self.follow = !!options.follow
+  self.dot = !!options.dot
+  self.mark = !!options.mark
+  self.nodir = !!options.nodir
+  if (self.nodir)
+    self.mark = true
+  self.sync = !!options.sync
+  self.nounique = !!options.nounique
+  self.nonull = !!options.nonull
+  self.nosort = !!options.nosort
+  self.nocase = !!options.nocase
+  self.stat = !!options.stat
+  self.noprocess = !!options.noprocess
+  self.absolute = !!options.absolute
+
+  self.maxLength = options.maxLength || Infinity
+  self.cache = options.cache || Object.create(null)
+  self.statCache = options.statCache || Object.create(null)
+  self.symlinks = options.symlinks || Object.create(null)
+
+  setupIgnores(self, options)
+
+  self.changedCwd = false
+  var cwd = process.cwd()
+  if (!ownProp(options, "cwd"))
+    self.cwd = cwd
+  else {
+    self.cwd = path.resolve(options.cwd)
+    self.changedCwd = self.cwd !== cwd
+  }
+
+  self.root = options.root || path.resolve(self.cwd, "/")
+  self.root = path.resolve(self.root)
+  if (process.platform === "win32")
+    self.root = self.root.replace(/\\/g, "/")
+
+  // TODO: is an absolute `cwd` supposed to be resolved against `root`?
+  // e.g. { cwd: '/test', root: __dirname } === path.join(__dirname, '/test')
+  self.cwdAbs = isAbsolute(self.cwd) ? self.cwd : makeAbs(self, self.cwd)
+  if (process.platform === "win32")
+    self.cwdAbs = self.cwdAbs.replace(/\\/g, "/")
+  self.nomount = !!options.nomount
+
+  // disable comments and negation in Minimatch.
+  // Note that they are not supported in Glob itself anyway.
+  options.nonegate = true
+  options.nocomment = true
+
+  self.minimatch = new Minimatch(pattern, options)
+  self.options = self.minimatch.options
+}
+
+function finish (self) {
+  var nou = self.nounique
+  var all = nou ? [] : Object.create(null)
+
+  for (var i = 0, l = self.matches.length; i < l; i ++) {
+    var matches = self.matches[i]
+    if (!matches || Object.keys(matches).length === 0) {
+      if (self.nonull) {
+        // do like the shell, and spit out the literal glob
+        var literal = self.minimatch.globSet[i]
+        if (nou)
+          all.push(literal)
+        else
+          all[literal] = true
+      }
+    } else {
+      // had matches
+      var m = Object.keys(matches)
+      if (nou)
+        all.push.apply(all, m)
+      else
+        m.forEach(function (m) {
+          all[m] = true
+        })
+    }
+  }
+
+  if (!nou)
+    all = Object.keys(all)
+
+  if (!self.nosort)
+    all = all.sort(self.nocase ? alphasorti : alphasort)
+
+  // at *some* point we statted all of these
+  if (self.mark) {
+    for (var i = 0; i < all.length; i++) {
+      all[i] = self._mark(all[i])
+    }
+    if (self.nodir) {
+      all = all.filter(function (e) {
+        var notDir = !(/\/$/.test(e))
+        var c = self.cache[e] || self.cache[makeAbs(self, e)]
+        if (notDir && c)
+          notDir = c !== 'DIR' && !Array.isArray(c)
+        return notDir
+      })
+    }
+  }
+
+  if (self.ignore.length)
+    all = all.filter(function(m) {
+      return !isIgnored(self, m)
+    })
+
+  self.found = all
+}
+
+function mark (self, p) {
+  var abs = makeAbs(self, p)
+  var c = self.cache[abs]
+  var m = p
+  if (c) {
+    var isDir = c === 'DIR' || Array.isArray(c)
+    var slash = p.slice(-1) === '/'
+
+    if (isDir && !slash)
+      m += '/'
+    else if (!isDir && slash)
+      m = m.slice(0, -1)
+
+    if (m !== p) {
+      var mabs = makeAbs(self, m)
+      self.statCache[mabs] = self.statCache[abs]
+      self.cache[mabs] = self.cache[abs]
+    }
+  }
+
+  return m
+}
+
+// lotta situps...
+function makeAbs (self, f) {
+  var abs = f
+  if (f.charAt(0) === '/') {
+    abs = path.join(self.root, f)
+  } else if (isAbsolute(f) || f === '') {
+    abs = f
+  } else if (self.changedCwd) {
+    abs = path.resolve(self.cwd, f)
+  } else {
+    abs = path.resolve(f)
+  }
+
+  if (process.platform === 'win32')
+    abs = abs.replace(/\\/g, '/')
+
+  return abs
+}
+
+
+// Return true, if pattern ends with globstar '**', for the accompanying parent directory.
+// Ex:- If node_modules/** is the pattern, add 'node_modules' to ignore list along with it's contents
+function isIgnored (self, path) {
+  if (!self.ignore.length)
+    return false
+
+  return self.ignore.some(function(item) {
+    return item.matcher.match(path) || !!(item.gmatcher && item.gmatcher.match(path))
+  })
+}
+
+function childrenIgnored (self, path) {
+  if (!self.ignore.length)
+    return false
+
+  return self.ignore.some(function(item) {
+    return !!(item.gmatcher && item.gmatcher.match(path))
+  })
+}
+
+
+/***/ }),
+
 /***/ 215:
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
 
@@ -5609,6 +20087,89 @@ module.exports = opts => {
 
 /***/ }),
 
+/***/ 265:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = authenticationPlugin;
+
+const { createTokenAuth } = __webpack_require__(268);
+const { Deprecation } = __webpack_require__(593);
+const once = __webpack_require__(870);
+
+const beforeRequest = __webpack_require__(618);
+const requestError = __webpack_require__(492);
+const validate = __webpack_require__(844);
+const withAuthorizationPrefix = __webpack_require__(398);
+
+const deprecateAuthBasic = once((log, deprecation) => log.warn(deprecation));
+const deprecateAuthObject = once((log, deprecation) => log.warn(deprecation));
+
+function authenticationPlugin(octokit, options) {
+  // If `options.authStrategy` is set then use it and pass in `options.auth`
+  if (options.authStrategy) {
+    const auth = options.authStrategy(options.auth);
+    octokit.hook.wrap("request", auth.hook);
+    octokit.auth = auth;
+    return;
+  }
+
+  // If neither `options.authStrategy` nor `options.auth` are set, the `octokit` instance
+  // is unauthenticated. The `octokit.auth()` method is a no-op and no request hook is registred.
+  if (!options.auth) {
+    octokit.auth = () =>
+      Promise.resolve({
+        type: "unauthenticated"
+      });
+    return;
+  }
+
+  const isBasicAuthString =
+    typeof options.auth === "string" &&
+    /^basic/.test(withAuthorizationPrefix(options.auth));
+
+  // If only `options.auth` is set to a string, use the default token authentication strategy.
+  if (typeof options.auth === "string" && !isBasicAuthString) {
+    const auth = createTokenAuth(options.auth);
+    octokit.hook.wrap("request", auth.hook);
+    octokit.auth = auth;
+    return;
+  }
+
+  // Otherwise log a deprecation message
+  const [deprecationMethod, deprecationMessapge] = isBasicAuthString
+    ? [
+        deprecateAuthBasic,
+        'Setting the "new Octokit({ auth })" option to a Basic Auth string is deprecated. Use https://github.com/octokit/auth-basic.js instead. See (https://octokit.github.io/rest.js/#authentication)'
+      ]
+    : [
+        deprecateAuthObject,
+        'Setting the "new Octokit({ auth })" option to an object without also setting the "authStrategy" option is deprecated and will be removed in v17. See (https://octokit.github.io/rest.js/#authentication)'
+      ];
+  deprecationMethod(
+    octokit.log,
+    new Deprecation("[@octokit/rest] " + deprecationMessapge)
+  );
+
+  octokit.auth = () =>
+    Promise.resolve({
+      type: "deprecated",
+      message: deprecationMessapge
+    });
+
+  validate(options.auth);
+
+  const state = {
+    octokit,
+    auth: options.auth
+  };
+
+  octokit.hook.before("request", beforeRequest.bind(null, state));
+  octokit.hook.error("request", requestError.bind(null, state));
+}
+
+
+/***/ }),
+
 /***/ 268:
 /***/ (function(__unusedmodule, exports) {
 
@@ -5686,6 +20247,20 @@ try {
 /***/ (function(module) {
 
 module.exports = require("path");
+
+/***/ }),
+
+/***/ 281:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = getLastPage
+
+const getPage = __webpack_require__(22)
+
+function getLastPage (octokit, link, headers) {
+  return getPage(octokit, link, 'last', headers)
+}
+
 
 /***/ }),
 
@@ -5918,64 +20493,34 @@ module.exports.MaxBufferError = MaxBufferError;
 /***/ }),
 
 /***/ 307:
-/***/ (function(__unusedmodule, exports) {
+/***/ (function(module) {
 
-"use strict";
+module.exports = deprecate
 
-Object.defineProperty(exports, "__esModule", { value: true });
-class BasicCredentialHandler {
-    constructor(username, password) {
-        this.username = username;
-        this.password = password;
-    }
-    prepareRequest(options) {
-        options.headers['Authorization'] = 'Basic ' + Buffer.from(this.username + ':' + this.password).toString('base64');
-    }
-    // This handler cannot handle 401
-    canHandleAuthentication(response) {
-        return false;
-    }
-    handleAuthentication(httpClient, requestInfo, objs) {
-        return null;
-    }
+const loggedMessages = {}
+
+function deprecate (message) {
+  if (loggedMessages[message]) {
+    return
+  }
+
+  console.warn(`DEPRECATED (@octokit/rest): ${message}`)
+  loggedMessages[message] = 1
 }
-exports.BasicCredentialHandler = BasicCredentialHandler;
-class BearerCredentialHandler {
-    constructor(token) {
-        this.token = token;
-    }
-    // currently implements pre-authorization
-    // TODO: support preAuth = false where it hooks on 401
-    prepareRequest(options) {
-        options.headers['Authorization'] = 'Bearer ' + this.token;
-    }
-    // This handler cannot handle 401
-    canHandleAuthentication(response) {
-        return false;
-    }
-    handleAuthentication(httpClient, requestInfo, objs) {
-        return null;
-    }
+
+
+/***/ }),
+
+/***/ 309:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = getPreviousPage
+
+const getPage = __webpack_require__(22)
+
+function getPreviousPage (octokit, link, headers) {
+  return getPage(octokit, link, 'prev', headers)
 }
-exports.BearerCredentialHandler = BearerCredentialHandler;
-class PersonalAccessTokenCredentialHandler {
-    constructor(token) {
-        this.token = token;
-    }
-    // currently implements pre-authorization
-    // TODO: support preAuth = false where it hooks on 401
-    prepareRequest(options) {
-        options.headers['Authorization'] = 'Basic ' + Buffer.from('PAT:' + this.token).toString('base64');
-    }
-    // This handler cannot handle 401
-    canHandleAuthentication(response) {
-        return false;
-    }
-    handleAuthentication(httpClient, requestInfo, objs) {
-        return null;
-    }
-}
-exports.PersonalAccessTokenCredentialHandler = PersonalAccessTokenCredentialHandler;
 
 
 /***/ }),
@@ -6058,6 +20603,28 @@ function removeHook (state, name, method) {
   }
 
   state.registry[name].splice(index, 1)
+}
+
+
+/***/ }),
+
+/***/ 327:
+/***/ (function(module) {
+
+module.exports = getPageLinks
+
+function getPageLinks (link) {
+  link = link.link || link.headers.link || ''
+
+  const links = {}
+
+  // link format:
+  // '<https://api.github.com/users/aseemk/followers?page=2>; rel="next", <https://api.github.com/users/aseemk/followers?page=2>; rel="last"'
+  link.replace(/<([^>]*)>;\s*rel="([\w]*)"/g, (m, uri, type) => {
+    links[type] = uri
+  })
+
+  return links
 }
 
 
@@ -7206,10 +21773,1104 @@ exports.realpath = function realpath(p, cache, cb) {
 
 /***/ }),
 
+/***/ 355:
+/***/ (function(module) {
+
+/**
+ * lodash (Custom Build) <https://lodash.com/>
+ * Build: `lodash modularize exports="npm" -o ./`
+ * Copyright jQuery Foundation and other contributors <https://jquery.org/>
+ * Released under MIT license <https://lodash.com/license>
+ * Based on Underscore.js 1.8.3 <http://underscorejs.org/LICENSE>
+ * Copyright Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
+ */
+
+/** Used as the `TypeError` message for "Functions" methods. */
+var FUNC_ERROR_TEXT = 'Expected a function';
+
+/** Used to stand-in for `undefined` hash values. */
+var HASH_UNDEFINED = '__lodash_hash_undefined__';
+
+/** Used as references for various `Number` constants. */
+var INFINITY = 1 / 0,
+    MAX_SAFE_INTEGER = 9007199254740991;
+
+/** `Object#toString` result references. */
+var funcTag = '[object Function]',
+    genTag = '[object GeneratorFunction]',
+    symbolTag = '[object Symbol]';
+
+/** Used to match property names within property paths. */
+var reIsDeepProp = /\.|\[(?:[^[\]]*|(["'])(?:(?!\1)[^\\]|\\.)*?\1)\]/,
+    reIsPlainProp = /^\w*$/,
+    reLeadingDot = /^\./,
+    rePropName = /[^.[\]]+|\[(?:(-?\d+(?:\.\d+)?)|(["'])((?:(?!\2)[^\\]|\\.)*?)\2)\]|(?=(?:\.|\[\])(?:\.|\[\]|$))/g;
+
+/**
+ * Used to match `RegExp`
+ * [syntax characters](http://ecma-international.org/ecma-262/7.0/#sec-patterns).
+ */
+var reRegExpChar = /[\\^$.*+?()[\]{}|]/g;
+
+/** Used to match backslashes in property paths. */
+var reEscapeChar = /\\(\\)?/g;
+
+/** Used to detect host constructors (Safari). */
+var reIsHostCtor = /^\[object .+?Constructor\]$/;
+
+/** Used to detect unsigned integer values. */
+var reIsUint = /^(?:0|[1-9]\d*)$/;
+
+/** Detect free variable `global` from Node.js. */
+var freeGlobal = typeof global == 'object' && global && global.Object === Object && global;
+
+/** Detect free variable `self`. */
+var freeSelf = typeof self == 'object' && self && self.Object === Object && self;
+
+/** Used as a reference to the global object. */
+var root = freeGlobal || freeSelf || Function('return this')();
+
+/**
+ * Gets the value at `key` of `object`.
+ *
+ * @private
+ * @param {Object} [object] The object to query.
+ * @param {string} key The key of the property to get.
+ * @returns {*} Returns the property value.
+ */
+function getValue(object, key) {
+  return object == null ? undefined : object[key];
+}
+
+/**
+ * Checks if `value` is a host object in IE < 9.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a host object, else `false`.
+ */
+function isHostObject(value) {
+  // Many host objects are `Object` objects that can coerce to strings
+  // despite having improperly defined `toString` methods.
+  var result = false;
+  if (value != null && typeof value.toString != 'function') {
+    try {
+      result = !!(value + '');
+    } catch (e) {}
+  }
+  return result;
+}
+
+/** Used for built-in method references. */
+var arrayProto = Array.prototype,
+    funcProto = Function.prototype,
+    objectProto = Object.prototype;
+
+/** Used to detect overreaching core-js shims. */
+var coreJsData = root['__core-js_shared__'];
+
+/** Used to detect methods masquerading as native. */
+var maskSrcKey = (function() {
+  var uid = /[^.]+$/.exec(coreJsData && coreJsData.keys && coreJsData.keys.IE_PROTO || '');
+  return uid ? ('Symbol(src)_1.' + uid) : '';
+}());
+
+/** Used to resolve the decompiled source of functions. */
+var funcToString = funcProto.toString;
+
+/** Used to check objects for own properties. */
+var hasOwnProperty = objectProto.hasOwnProperty;
+
+/**
+ * Used to resolve the
+ * [`toStringTag`](http://ecma-international.org/ecma-262/7.0/#sec-object.prototype.tostring)
+ * of values.
+ */
+var objectToString = objectProto.toString;
+
+/** Used to detect if a method is native. */
+var reIsNative = RegExp('^' +
+  funcToString.call(hasOwnProperty).replace(reRegExpChar, '\\$&')
+  .replace(/hasOwnProperty|(function).*?(?=\\\()| for .+?(?=\\\])/g, '$1.*?') + '$'
+);
+
+/** Built-in value references. */
+var Symbol = root.Symbol,
+    splice = arrayProto.splice;
+
+/* Built-in method references that are verified to be native. */
+var Map = getNative(root, 'Map'),
+    nativeCreate = getNative(Object, 'create');
+
+/** Used to convert symbols to primitives and strings. */
+var symbolProto = Symbol ? Symbol.prototype : undefined,
+    symbolToString = symbolProto ? symbolProto.toString : undefined;
+
+/**
+ * Creates a hash object.
+ *
+ * @private
+ * @constructor
+ * @param {Array} [entries] The key-value pairs to cache.
+ */
+function Hash(entries) {
+  var index = -1,
+      length = entries ? entries.length : 0;
+
+  this.clear();
+  while (++index < length) {
+    var entry = entries[index];
+    this.set(entry[0], entry[1]);
+  }
+}
+
+/**
+ * Removes all key-value entries from the hash.
+ *
+ * @private
+ * @name clear
+ * @memberOf Hash
+ */
+function hashClear() {
+  this.__data__ = nativeCreate ? nativeCreate(null) : {};
+}
+
+/**
+ * Removes `key` and its value from the hash.
+ *
+ * @private
+ * @name delete
+ * @memberOf Hash
+ * @param {Object} hash The hash to modify.
+ * @param {string} key The key of the value to remove.
+ * @returns {boolean} Returns `true` if the entry was removed, else `false`.
+ */
+function hashDelete(key) {
+  return this.has(key) && delete this.__data__[key];
+}
+
+/**
+ * Gets the hash value for `key`.
+ *
+ * @private
+ * @name get
+ * @memberOf Hash
+ * @param {string} key The key of the value to get.
+ * @returns {*} Returns the entry value.
+ */
+function hashGet(key) {
+  var data = this.__data__;
+  if (nativeCreate) {
+    var result = data[key];
+    return result === HASH_UNDEFINED ? undefined : result;
+  }
+  return hasOwnProperty.call(data, key) ? data[key] : undefined;
+}
+
+/**
+ * Checks if a hash value for `key` exists.
+ *
+ * @private
+ * @name has
+ * @memberOf Hash
+ * @param {string} key The key of the entry to check.
+ * @returns {boolean} Returns `true` if an entry for `key` exists, else `false`.
+ */
+function hashHas(key) {
+  var data = this.__data__;
+  return nativeCreate ? data[key] !== undefined : hasOwnProperty.call(data, key);
+}
+
+/**
+ * Sets the hash `key` to `value`.
+ *
+ * @private
+ * @name set
+ * @memberOf Hash
+ * @param {string} key The key of the value to set.
+ * @param {*} value The value to set.
+ * @returns {Object} Returns the hash instance.
+ */
+function hashSet(key, value) {
+  var data = this.__data__;
+  data[key] = (nativeCreate && value === undefined) ? HASH_UNDEFINED : value;
+  return this;
+}
+
+// Add methods to `Hash`.
+Hash.prototype.clear = hashClear;
+Hash.prototype['delete'] = hashDelete;
+Hash.prototype.get = hashGet;
+Hash.prototype.has = hashHas;
+Hash.prototype.set = hashSet;
+
+/**
+ * Creates an list cache object.
+ *
+ * @private
+ * @constructor
+ * @param {Array} [entries] The key-value pairs to cache.
+ */
+function ListCache(entries) {
+  var index = -1,
+      length = entries ? entries.length : 0;
+
+  this.clear();
+  while (++index < length) {
+    var entry = entries[index];
+    this.set(entry[0], entry[1]);
+  }
+}
+
+/**
+ * Removes all key-value entries from the list cache.
+ *
+ * @private
+ * @name clear
+ * @memberOf ListCache
+ */
+function listCacheClear() {
+  this.__data__ = [];
+}
+
+/**
+ * Removes `key` and its value from the list cache.
+ *
+ * @private
+ * @name delete
+ * @memberOf ListCache
+ * @param {string} key The key of the value to remove.
+ * @returns {boolean} Returns `true` if the entry was removed, else `false`.
+ */
+function listCacheDelete(key) {
+  var data = this.__data__,
+      index = assocIndexOf(data, key);
+
+  if (index < 0) {
+    return false;
+  }
+  var lastIndex = data.length - 1;
+  if (index == lastIndex) {
+    data.pop();
+  } else {
+    splice.call(data, index, 1);
+  }
+  return true;
+}
+
+/**
+ * Gets the list cache value for `key`.
+ *
+ * @private
+ * @name get
+ * @memberOf ListCache
+ * @param {string} key The key of the value to get.
+ * @returns {*} Returns the entry value.
+ */
+function listCacheGet(key) {
+  var data = this.__data__,
+      index = assocIndexOf(data, key);
+
+  return index < 0 ? undefined : data[index][1];
+}
+
+/**
+ * Checks if a list cache value for `key` exists.
+ *
+ * @private
+ * @name has
+ * @memberOf ListCache
+ * @param {string} key The key of the entry to check.
+ * @returns {boolean} Returns `true` if an entry for `key` exists, else `false`.
+ */
+function listCacheHas(key) {
+  return assocIndexOf(this.__data__, key) > -1;
+}
+
+/**
+ * Sets the list cache `key` to `value`.
+ *
+ * @private
+ * @name set
+ * @memberOf ListCache
+ * @param {string} key The key of the value to set.
+ * @param {*} value The value to set.
+ * @returns {Object} Returns the list cache instance.
+ */
+function listCacheSet(key, value) {
+  var data = this.__data__,
+      index = assocIndexOf(data, key);
+
+  if (index < 0) {
+    data.push([key, value]);
+  } else {
+    data[index][1] = value;
+  }
+  return this;
+}
+
+// Add methods to `ListCache`.
+ListCache.prototype.clear = listCacheClear;
+ListCache.prototype['delete'] = listCacheDelete;
+ListCache.prototype.get = listCacheGet;
+ListCache.prototype.has = listCacheHas;
+ListCache.prototype.set = listCacheSet;
+
+/**
+ * Creates a map cache object to store key-value pairs.
+ *
+ * @private
+ * @constructor
+ * @param {Array} [entries] The key-value pairs to cache.
+ */
+function MapCache(entries) {
+  var index = -1,
+      length = entries ? entries.length : 0;
+
+  this.clear();
+  while (++index < length) {
+    var entry = entries[index];
+    this.set(entry[0], entry[1]);
+  }
+}
+
+/**
+ * Removes all key-value entries from the map.
+ *
+ * @private
+ * @name clear
+ * @memberOf MapCache
+ */
+function mapCacheClear() {
+  this.__data__ = {
+    'hash': new Hash,
+    'map': new (Map || ListCache),
+    'string': new Hash
+  };
+}
+
+/**
+ * Removes `key` and its value from the map.
+ *
+ * @private
+ * @name delete
+ * @memberOf MapCache
+ * @param {string} key The key of the value to remove.
+ * @returns {boolean} Returns `true` if the entry was removed, else `false`.
+ */
+function mapCacheDelete(key) {
+  return getMapData(this, key)['delete'](key);
+}
+
+/**
+ * Gets the map value for `key`.
+ *
+ * @private
+ * @name get
+ * @memberOf MapCache
+ * @param {string} key The key of the value to get.
+ * @returns {*} Returns the entry value.
+ */
+function mapCacheGet(key) {
+  return getMapData(this, key).get(key);
+}
+
+/**
+ * Checks if a map value for `key` exists.
+ *
+ * @private
+ * @name has
+ * @memberOf MapCache
+ * @param {string} key The key of the entry to check.
+ * @returns {boolean} Returns `true` if an entry for `key` exists, else `false`.
+ */
+function mapCacheHas(key) {
+  return getMapData(this, key).has(key);
+}
+
+/**
+ * Sets the map `key` to `value`.
+ *
+ * @private
+ * @name set
+ * @memberOf MapCache
+ * @param {string} key The key of the value to set.
+ * @param {*} value The value to set.
+ * @returns {Object} Returns the map cache instance.
+ */
+function mapCacheSet(key, value) {
+  getMapData(this, key).set(key, value);
+  return this;
+}
+
+// Add methods to `MapCache`.
+MapCache.prototype.clear = mapCacheClear;
+MapCache.prototype['delete'] = mapCacheDelete;
+MapCache.prototype.get = mapCacheGet;
+MapCache.prototype.has = mapCacheHas;
+MapCache.prototype.set = mapCacheSet;
+
+/**
+ * Assigns `value` to `key` of `object` if the existing value is not equivalent
+ * using [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
+ * for equality comparisons.
+ *
+ * @private
+ * @param {Object} object The object to modify.
+ * @param {string} key The key of the property to assign.
+ * @param {*} value The value to assign.
+ */
+function assignValue(object, key, value) {
+  var objValue = object[key];
+  if (!(hasOwnProperty.call(object, key) && eq(objValue, value)) ||
+      (value === undefined && !(key in object))) {
+    object[key] = value;
+  }
+}
+
+/**
+ * Gets the index at which the `key` is found in `array` of key-value pairs.
+ *
+ * @private
+ * @param {Array} array The array to inspect.
+ * @param {*} key The key to search for.
+ * @returns {number} Returns the index of the matched value, else `-1`.
+ */
+function assocIndexOf(array, key) {
+  var length = array.length;
+  while (length--) {
+    if (eq(array[length][0], key)) {
+      return length;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The base implementation of `_.isNative` without bad shim checks.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a native function,
+ *  else `false`.
+ */
+function baseIsNative(value) {
+  if (!isObject(value) || isMasked(value)) {
+    return false;
+  }
+  var pattern = (isFunction(value) || isHostObject(value)) ? reIsNative : reIsHostCtor;
+  return pattern.test(toSource(value));
+}
+
+/**
+ * The base implementation of `_.set`.
+ *
+ * @private
+ * @param {Object} object The object to modify.
+ * @param {Array|string} path The path of the property to set.
+ * @param {*} value The value to set.
+ * @param {Function} [customizer] The function to customize path creation.
+ * @returns {Object} Returns `object`.
+ */
+function baseSet(object, path, value, customizer) {
+  if (!isObject(object)) {
+    return object;
+  }
+  path = isKey(path, object) ? [path] : castPath(path);
+
+  var index = -1,
+      length = path.length,
+      lastIndex = length - 1,
+      nested = object;
+
+  while (nested != null && ++index < length) {
+    var key = toKey(path[index]),
+        newValue = value;
+
+    if (index != lastIndex) {
+      var objValue = nested[key];
+      newValue = customizer ? customizer(objValue, key, nested) : undefined;
+      if (newValue === undefined) {
+        newValue = isObject(objValue)
+          ? objValue
+          : (isIndex(path[index + 1]) ? [] : {});
+      }
+    }
+    assignValue(nested, key, newValue);
+    nested = nested[key];
+  }
+  return object;
+}
+
+/**
+ * The base implementation of `_.toString` which doesn't convert nullish
+ * values to empty strings.
+ *
+ * @private
+ * @param {*} value The value to process.
+ * @returns {string} Returns the string.
+ */
+function baseToString(value) {
+  // Exit early for strings to avoid a performance hit in some environments.
+  if (typeof value == 'string') {
+    return value;
+  }
+  if (isSymbol(value)) {
+    return symbolToString ? symbolToString.call(value) : '';
+  }
+  var result = (value + '');
+  return (result == '0' && (1 / value) == -INFINITY) ? '-0' : result;
+}
+
+/**
+ * Casts `value` to a path array if it's not one.
+ *
+ * @private
+ * @param {*} value The value to inspect.
+ * @returns {Array} Returns the cast property path array.
+ */
+function castPath(value) {
+  return isArray(value) ? value : stringToPath(value);
+}
+
+/**
+ * Gets the data for `map`.
+ *
+ * @private
+ * @param {Object} map The map to query.
+ * @param {string} key The reference key.
+ * @returns {*} Returns the map data.
+ */
+function getMapData(map, key) {
+  var data = map.__data__;
+  return isKeyable(key)
+    ? data[typeof key == 'string' ? 'string' : 'hash']
+    : data.map;
+}
+
+/**
+ * Gets the native function at `key` of `object`.
+ *
+ * @private
+ * @param {Object} object The object to query.
+ * @param {string} key The key of the method to get.
+ * @returns {*} Returns the function if it's native, else `undefined`.
+ */
+function getNative(object, key) {
+  var value = getValue(object, key);
+  return baseIsNative(value) ? value : undefined;
+}
+
+/**
+ * Checks if `value` is a valid array-like index.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @param {number} [length=MAX_SAFE_INTEGER] The upper bounds of a valid index.
+ * @returns {boolean} Returns `true` if `value` is a valid index, else `false`.
+ */
+function isIndex(value, length) {
+  length = length == null ? MAX_SAFE_INTEGER : length;
+  return !!length &&
+    (typeof value == 'number' || reIsUint.test(value)) &&
+    (value > -1 && value % 1 == 0 && value < length);
+}
+
+/**
+ * Checks if `value` is a property name and not a property path.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @param {Object} [object] The object to query keys on.
+ * @returns {boolean} Returns `true` if `value` is a property name, else `false`.
+ */
+function isKey(value, object) {
+  if (isArray(value)) {
+    return false;
+  }
+  var type = typeof value;
+  if (type == 'number' || type == 'symbol' || type == 'boolean' ||
+      value == null || isSymbol(value)) {
+    return true;
+  }
+  return reIsPlainProp.test(value) || !reIsDeepProp.test(value) ||
+    (object != null && value in Object(object));
+}
+
+/**
+ * Checks if `value` is suitable for use as unique object key.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is suitable, else `false`.
+ */
+function isKeyable(value) {
+  var type = typeof value;
+  return (type == 'string' || type == 'number' || type == 'symbol' || type == 'boolean')
+    ? (value !== '__proto__')
+    : (value === null);
+}
+
+/**
+ * Checks if `func` has its source masked.
+ *
+ * @private
+ * @param {Function} func The function to check.
+ * @returns {boolean} Returns `true` if `func` is masked, else `false`.
+ */
+function isMasked(func) {
+  return !!maskSrcKey && (maskSrcKey in func);
+}
+
+/**
+ * Converts `string` to a property path array.
+ *
+ * @private
+ * @param {string} string The string to convert.
+ * @returns {Array} Returns the property path array.
+ */
+var stringToPath = memoize(function(string) {
+  string = toString(string);
+
+  var result = [];
+  if (reLeadingDot.test(string)) {
+    result.push('');
+  }
+  string.replace(rePropName, function(match, number, quote, string) {
+    result.push(quote ? string.replace(reEscapeChar, '$1') : (number || match));
+  });
+  return result;
+});
+
+/**
+ * Converts `value` to a string key if it's not a string or symbol.
+ *
+ * @private
+ * @param {*} value The value to inspect.
+ * @returns {string|symbol} Returns the key.
+ */
+function toKey(value) {
+  if (typeof value == 'string' || isSymbol(value)) {
+    return value;
+  }
+  var result = (value + '');
+  return (result == '0' && (1 / value) == -INFINITY) ? '-0' : result;
+}
+
+/**
+ * Converts `func` to its source code.
+ *
+ * @private
+ * @param {Function} func The function to process.
+ * @returns {string} Returns the source code.
+ */
+function toSource(func) {
+  if (func != null) {
+    try {
+      return funcToString.call(func);
+    } catch (e) {}
+    try {
+      return (func + '');
+    } catch (e) {}
+  }
+  return '';
+}
+
+/**
+ * Creates a function that memoizes the result of `func`. If `resolver` is
+ * provided, it determines the cache key for storing the result based on the
+ * arguments provided to the memoized function. By default, the first argument
+ * provided to the memoized function is used as the map cache key. The `func`
+ * is invoked with the `this` binding of the memoized function.
+ *
+ * **Note:** The cache is exposed as the `cache` property on the memoized
+ * function. Its creation may be customized by replacing the `_.memoize.Cache`
+ * constructor with one whose instances implement the
+ * [`Map`](http://ecma-international.org/ecma-262/7.0/#sec-properties-of-the-map-prototype-object)
+ * method interface of `delete`, `get`, `has`, and `set`.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Function
+ * @param {Function} func The function to have its output memoized.
+ * @param {Function} [resolver] The function to resolve the cache key.
+ * @returns {Function} Returns the new memoized function.
+ * @example
+ *
+ * var object = { 'a': 1, 'b': 2 };
+ * var other = { 'c': 3, 'd': 4 };
+ *
+ * var values = _.memoize(_.values);
+ * values(object);
+ * // => [1, 2]
+ *
+ * values(other);
+ * // => [3, 4]
+ *
+ * object.a = 2;
+ * values(object);
+ * // => [1, 2]
+ *
+ * // Modify the result cache.
+ * values.cache.set(object, ['a', 'b']);
+ * values(object);
+ * // => ['a', 'b']
+ *
+ * // Replace `_.memoize.Cache`.
+ * _.memoize.Cache = WeakMap;
+ */
+function memoize(func, resolver) {
+  if (typeof func != 'function' || (resolver && typeof resolver != 'function')) {
+    throw new TypeError(FUNC_ERROR_TEXT);
+  }
+  var memoized = function() {
+    var args = arguments,
+        key = resolver ? resolver.apply(this, args) : args[0],
+        cache = memoized.cache;
+
+    if (cache.has(key)) {
+      return cache.get(key);
+    }
+    var result = func.apply(this, args);
+    memoized.cache = cache.set(key, result);
+    return result;
+  };
+  memoized.cache = new (memoize.Cache || MapCache);
+  return memoized;
+}
+
+// Assign cache to `_.memoize`.
+memoize.Cache = MapCache;
+
+/**
+ * Performs a
+ * [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
+ * comparison between two values to determine if they are equivalent.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to compare.
+ * @param {*} other The other value to compare.
+ * @returns {boolean} Returns `true` if the values are equivalent, else `false`.
+ * @example
+ *
+ * var object = { 'a': 1 };
+ * var other = { 'a': 1 };
+ *
+ * _.eq(object, object);
+ * // => true
+ *
+ * _.eq(object, other);
+ * // => false
+ *
+ * _.eq('a', 'a');
+ * // => true
+ *
+ * _.eq('a', Object('a'));
+ * // => false
+ *
+ * _.eq(NaN, NaN);
+ * // => true
+ */
+function eq(value, other) {
+  return value === other || (value !== value && other !== other);
+}
+
+/**
+ * Checks if `value` is classified as an `Array` object.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is an array, else `false`.
+ * @example
+ *
+ * _.isArray([1, 2, 3]);
+ * // => true
+ *
+ * _.isArray(document.body.children);
+ * // => false
+ *
+ * _.isArray('abc');
+ * // => false
+ *
+ * _.isArray(_.noop);
+ * // => false
+ */
+var isArray = Array.isArray;
+
+/**
+ * Checks if `value` is classified as a `Function` object.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a function, else `false`.
+ * @example
+ *
+ * _.isFunction(_);
+ * // => true
+ *
+ * _.isFunction(/abc/);
+ * // => false
+ */
+function isFunction(value) {
+  // The use of `Object#toString` avoids issues with the `typeof` operator
+  // in Safari 8-9 which returns 'object' for typed array and other constructors.
+  var tag = isObject(value) ? objectToString.call(value) : '';
+  return tag == funcTag || tag == genTag;
+}
+
+/**
+ * Checks if `value` is the
+ * [language type](http://www.ecma-international.org/ecma-262/7.0/#sec-ecmascript-language-types)
+ * of `Object`. (e.g. arrays, functions, objects, regexes, `new Number(0)`, and `new String('')`)
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is an object, else `false`.
+ * @example
+ *
+ * _.isObject({});
+ * // => true
+ *
+ * _.isObject([1, 2, 3]);
+ * // => true
+ *
+ * _.isObject(_.noop);
+ * // => true
+ *
+ * _.isObject(null);
+ * // => false
+ */
+function isObject(value) {
+  var type = typeof value;
+  return !!value && (type == 'object' || type == 'function');
+}
+
+/**
+ * Checks if `value` is object-like. A value is object-like if it's not `null`
+ * and has a `typeof` result of "object".
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is object-like, else `false`.
+ * @example
+ *
+ * _.isObjectLike({});
+ * // => true
+ *
+ * _.isObjectLike([1, 2, 3]);
+ * // => true
+ *
+ * _.isObjectLike(_.noop);
+ * // => false
+ *
+ * _.isObjectLike(null);
+ * // => false
+ */
+function isObjectLike(value) {
+  return !!value && typeof value == 'object';
+}
+
+/**
+ * Checks if `value` is classified as a `Symbol` primitive or object.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a symbol, else `false`.
+ * @example
+ *
+ * _.isSymbol(Symbol.iterator);
+ * // => true
+ *
+ * _.isSymbol('abc');
+ * // => false
+ */
+function isSymbol(value) {
+  return typeof value == 'symbol' ||
+    (isObjectLike(value) && objectToString.call(value) == symbolTag);
+}
+
+/**
+ * Converts `value` to a string. An empty string is returned for `null`
+ * and `undefined` values. The sign of `-0` is preserved.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to process.
+ * @returns {string} Returns the string.
+ * @example
+ *
+ * _.toString(null);
+ * // => ''
+ *
+ * _.toString(-0);
+ * // => '-0'
+ *
+ * _.toString([1, 2, 3]);
+ * // => '1,2,3'
+ */
+function toString(value) {
+  return value == null ? '' : baseToString(value);
+}
+
+/**
+ * Sets the value at `path` of `object`. If a portion of `path` doesn't exist,
+ * it's created. Arrays are created for missing index properties while objects
+ * are created for all other missing properties. Use `_.setWith` to customize
+ * `path` creation.
+ *
+ * **Note:** This method mutates `object`.
+ *
+ * @static
+ * @memberOf _
+ * @since 3.7.0
+ * @category Object
+ * @param {Object} object The object to modify.
+ * @param {Array|string} path The path of the property to set.
+ * @param {*} value The value to set.
+ * @returns {Object} Returns `object`.
+ * @example
+ *
+ * var object = { 'a': [{ 'b': { 'c': 3 } }] };
+ *
+ * _.set(object, 'a[0].b.c', 4);
+ * console.log(object.a[0].b.c);
+ * // => 4
+ *
+ * _.set(object, ['x', '0', 'y', 'z'], 5);
+ * console.log(object.x[0].y.z);
+ * // => 5
+ */
+function set(object, path, value) {
+  return object == null ? object : baseSet(object, path, value);
+}
+
+module.exports = set;
+
+
+/***/ }),
+
 /***/ 357:
 /***/ (function(module) {
 
 module.exports = require("assert");
+
+/***/ }),
+
+/***/ 359:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = authenticationPlugin;
+
+const { Deprecation } = __webpack_require__(593);
+const once = __webpack_require__(870);
+
+const deprecateAuthenticate = once((log, deprecation) => log.warn(deprecation));
+
+const authenticate = __webpack_require__(365);
+const beforeRequest = __webpack_require__(467);
+const requestError = __webpack_require__(18);
+
+function authenticationPlugin(octokit, options) {
+  if (options.auth) {
+    octokit.authenticate = () => {
+      deprecateAuthenticate(
+        octokit.log,
+        new Deprecation(
+          '[@octokit/rest] octokit.authenticate() is deprecated and has no effect when "auth" option is set on Octokit constructor'
+        )
+      );
+    };
+    return;
+  }
+  const state = {
+    octokit,
+    auth: false
+  };
+  octokit.authenticate = authenticate.bind(null, state);
+  octokit.hook.before("request", beforeRequest.bind(null, state));
+  octokit.hook.error("request", requestError.bind(null, state));
+}
+
+
+/***/ }),
+
+/***/ 365:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = authenticate;
+
+const { Deprecation } = __webpack_require__(593);
+const once = __webpack_require__(870);
+
+const deprecateAuthenticate = once((log, deprecation) => log.warn(deprecation));
+
+function authenticate(state, options) {
+  deprecateAuthenticate(
+    state.octokit.log,
+    new Deprecation(
+      '[@octokit/rest] octokit.authenticate() is deprecated. Use "auth" constructor option instead.'
+    )
+  );
+
+  if (!options) {
+    state.auth = false;
+    return;
+  }
+
+  switch (options.type) {
+    case "basic":
+      if (!options.username || !options.password) {
+        throw new Error(
+          "Basic authentication requires both a username and password to be set"
+        );
+      }
+      break;
+
+    case "oauth":
+      if (!options.token && !(options.key && options.secret)) {
+        throw new Error(
+          "OAuth2 authentication requires a token or key & secret to be set"
+        );
+      }
+      break;
+
+    case "token":
+    case "app":
+      if (!options.token) {
+        throw new Error("Token authentication requires a token to be set");
+      }
+      break;
+
+    default:
+      throw new Error(
+        "Invalid authentication type, must be 'basic', 'oauth', 'token' or 'app'"
+      );
+  }
+
+  state.auth = options;
+}
+
 
 /***/ }),
 
@@ -7264,6 +22925,89 @@ function resolveCommand(parsed) {
 }
 
 module.exports = resolveCommand;
+
+
+/***/ }),
+
+/***/ 390:
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", { value: true });
+const fs_1 = __webpack_require__(747);
+const os_1 = __webpack_require__(87);
+class Context {
+    /**
+     * Hydrate the context from the environment
+     */
+    constructor() {
+        this.payload = {};
+        if (process.env.GITHUB_EVENT_PATH) {
+            if (fs_1.existsSync(process.env.GITHUB_EVENT_PATH)) {
+                this.payload = JSON.parse(fs_1.readFileSync(process.env.GITHUB_EVENT_PATH, { encoding: 'utf8' }));
+            }
+            else {
+                const path = process.env.GITHUB_EVENT_PATH;
+                process.stdout.write(`GITHUB_EVENT_PATH ${path} does not exist${os_1.EOL}`);
+            }
+        }
+        this.eventName = process.env.GITHUB_EVENT_NAME;
+        this.sha = process.env.GITHUB_SHA;
+        this.ref = process.env.GITHUB_REF;
+        this.workflow = process.env.GITHUB_WORKFLOW;
+        this.action = process.env.GITHUB_ACTION;
+        this.actor = process.env.GITHUB_ACTOR;
+    }
+    get issue() {
+        const payload = this.payload;
+        return Object.assign(Object.assign({}, this.repo), { number: (payload.issue || payload.pull_request || payload).number });
+    }
+    get repo() {
+        if (process.env.GITHUB_REPOSITORY) {
+            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+            return { owner, repo };
+        }
+        if (this.payload.repository) {
+            return {
+                owner: this.payload.repository.owner.login,
+                repo: this.payload.repository.name
+            };
+        }
+        throw new Error("context.repo requires a GITHUB_REPOSITORY environment variable like 'owner/repo'");
+    }
+}
+exports.Context = Context;
+//# sourceMappingURL=context.js.map
+
+/***/ }),
+
+/***/ 398:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = withAuthorizationPrefix;
+
+const atob = __webpack_require__(805);
+
+const REGEX_IS_BASIC_AUTH = /^[\w-]+:/;
+
+function withAuthorizationPrefix(authorization) {
+  if (/^(basic|bearer|token) /i.test(authorization)) {
+    return authorization;
+  }
+
+  try {
+    if (REGEX_IS_BASIC_AUTH.test(atob(authorization))) {
+      return `basic ${authorization}`;
+    }
+  } catch (error) {}
+
+  if (authorization.split(/\./).length === 3) {
+    return `bearer ${authorization}`;
+  }
+
+  return `token ${authorization}`;
+}
 
 
 /***/ }),
@@ -7490,6 +23234,101 @@ module.exports = require("crypto");
 
 /***/ }),
 
+/***/ 420:
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (Object.hasOwnProperty.call(mod, k)) result[k] = mod[k];
+    result["default"] = mod;
+    return result;
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const fs = __importStar(__webpack_require__(747));
+const core_1 = __webpack_require__(827);
+const path_1 = __webpack_require__(277);
+const utils_1 = __webpack_require__(435);
+/**
+ * Creates a specification that describes how each file that is part of the artifact will be uploaded
+ * @param artifactName the name of the artifact being uploaded. Used during upload to denote where the artifact is stored on the server
+ * @param rootDirectory an absolute file path that denotes the path that should be removed from the beginning of each artifact file
+ * @param artifactFiles a list of absolute file paths that denote what should be uploaded as part of the artifact
+ */
+function getUploadSpecification(artifactName, rootDirectory, artifactFiles) {
+    utils_1.checkArtifactName(artifactName);
+    const specifications = [];
+    if (!fs.existsSync(rootDirectory)) {
+        throw new Error(`Provided rootDirectory ${rootDirectory} does not exist`);
+    }
+    if (!fs.lstatSync(rootDirectory).isDirectory()) {
+        throw new Error(`Provided rootDirectory ${rootDirectory} is not a valid directory`);
+    }
+    // Normalize and resolve, this allows for either absolute or relative paths to be used
+    rootDirectory = path_1.normalize(rootDirectory);
+    rootDirectory = path_1.resolve(rootDirectory);
+    /*
+       Example to demonstrate behavior
+       
+       Input:
+         artifactName: my-artifact
+         rootDirectory: '/home/user/files/plz-upload'
+         artifactFiles: [
+           '/home/user/files/plz-upload/file1.txt',
+           '/home/user/files/plz-upload/file2.txt',
+           '/home/user/files/plz-upload/dir/file3.txt'
+         ]
+       
+       Output:
+         specifications: [
+           ['/home/user/files/plz-upload/file1.txt', 'my-artifact/file1.txt'],
+           ['/home/user/files/plz-upload/file1.txt', 'my-artifact/file2.txt'],
+           ['/home/user/files/plz-upload/file1.txt', 'my-artifact/dir/file3.txt']
+         ]
+    */
+    for (let file of artifactFiles) {
+        if (!fs.existsSync(file)) {
+            throw new Error(`File ${file} does not exist`);
+        }
+        if (!fs.lstatSync(file).isDirectory()) {
+            // Normalize and resolve, this allows for either absolute or relative paths to be used
+            file = path_1.normalize(file);
+            file = path_1.resolve(file);
+            if (!file.startsWith(rootDirectory)) {
+                throw new Error(`The rootDirectory: ${rootDirectory} is not a parent directory of the file: ${file}`);
+            }
+            // Check for forbidden characters in file paths that will be rejected during upload
+            const uploadPath = file.replace(rootDirectory, '');
+            utils_1.checkArtifactFilePath(uploadPath);
+            /*
+              uploadFilePath denotes where the file will be uploaded in the file container on the server. During a run, if multiple artifacts are uploaded, they will all
+              be saved in the same container. The artifact name is used as the root directory in the container to separate and distinguish uploaded artifacts
+      
+              path.join handles all the following cases and would return 'artifact-name/file-to-upload.txt
+                join('artifact-name/', 'file-to-upload.txt')
+                join('artifact-name/', '/file-to-upload.txt')
+                join('artifact-name', 'file-to-upload.txt')
+                join('artifact-name', '/file-to-upload.txt')
+            */
+            specifications.push({
+                absoluteFilePath: file,
+                uploadFilePath: path_1.join(artifactName, uploadPath)
+            });
+        }
+        else {
+            // Directories are rejected by the server during upload
+            core_1.debug(`Removing ${file} from rawSearchResults because it is a directory`);
+        }
+    }
+    return specifications;
+}
+exports.getUploadSpecification = getUploadSpecification;
+//# sourceMappingURL=upload-specification.js.map
+
+/***/ }),
+
 /***/ 421:
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
@@ -7546,6 +23385,22 @@ function slice (args) {
 
   for (var i = 0; i < length; i++) array[i] = args[i]
   return array
+}
+
+
+/***/ }),
+
+/***/ 429:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = registerPlugin;
+
+const factory = __webpack_require__(535);
+
+function registerPlugin(plugins, pluginFunction) {
+  return factory(
+    plugins.includes(pluginFunction) ? plugins : plugins.concat(pluginFunction)
+  );
 }
 
 
@@ -7638,7 +23493,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const core_1 = __webpack_require__(827);
 const fs_1 = __webpack_require__(747);
 const http_client_1 = __webpack_require__(7);
-const auth_1 = __webpack_require__(307);
+const auth_1 = __webpack_require__(458);
 const config_variables_1 = __webpack_require__(973);
 /**
  * Parses a env variable that is a number
@@ -7798,6 +23653,69 @@ exports.createDirectoriesForArtifact = createDirectoriesForArtifact;
 
 /***/ }),
 
+/***/ 458:
+/***/ (function(__unusedmodule, exports) {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", { value: true });
+class BasicCredentialHandler {
+    constructor(username, password) {
+        this.username = username;
+        this.password = password;
+    }
+    prepareRequest(options) {
+        options.headers['Authorization'] = 'Basic ' + Buffer.from(this.username + ':' + this.password).toString('base64');
+    }
+    // This handler cannot handle 401
+    canHandleAuthentication(response) {
+        return false;
+    }
+    handleAuthentication(httpClient, requestInfo, objs) {
+        return null;
+    }
+}
+exports.BasicCredentialHandler = BasicCredentialHandler;
+class BearerCredentialHandler {
+    constructor(token) {
+        this.token = token;
+    }
+    // currently implements pre-authorization
+    // TODO: support preAuth = false where it hooks on 401
+    prepareRequest(options) {
+        options.headers['Authorization'] = 'Bearer ' + this.token;
+    }
+    // This handler cannot handle 401
+    canHandleAuthentication(response) {
+        return false;
+    }
+    handleAuthentication(httpClient, requestInfo, objs) {
+        return null;
+    }
+}
+exports.BearerCredentialHandler = BearerCredentialHandler;
+class PersonalAccessTokenCredentialHandler {
+    constructor(token) {
+        this.token = token;
+    }
+    // currently implements pre-authorization
+    // TODO: support preAuth = false where it hooks on 401
+    prepareRequest(options) {
+        options.headers['Authorization'] = 'Basic ' + Buffer.from('PAT:' + this.token).toString('base64');
+    }
+    // This handler cannot handle 401
+    canHandleAuthentication(response) {
+        return false;
+    }
+    handleAuthentication(httpClient, requestInfo, objs) {
+        return null;
+    }
+}
+exports.PersonalAccessTokenCredentialHandler = PersonalAccessTokenCredentialHandler;
+
+
+/***/ }),
+
 /***/ 460:
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
 
@@ -7874,6 +23792,124 @@ module.exports.tmpName = promisify(tmp.tmpName);
 module.exports.tmpdir = tmp.tmpdir;
 
 module.exports.setGracefulCleanup = tmp.setGracefulCleanup;
+
+
+/***/ }),
+
+/***/ 467:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = authenticationBeforeRequest;
+
+const btoa = __webpack_require__(730);
+const uniq = __webpack_require__(162);
+
+function authenticationBeforeRequest(state, options) {
+  if (!state.auth.type) {
+    return;
+  }
+
+  if (state.auth.type === "basic") {
+    const hash = btoa(`${state.auth.username}:${state.auth.password}`);
+    options.headers.authorization = `Basic ${hash}`;
+    return;
+  }
+
+  if (state.auth.type === "token") {
+    options.headers.authorization = `token ${state.auth.token}`;
+    return;
+  }
+
+  if (state.auth.type === "app") {
+    options.headers.authorization = `Bearer ${state.auth.token}`;
+    const acceptHeaders = options.headers.accept
+      .split(",")
+      .concat("application/vnd.github.machine-man-preview+json");
+    options.headers.accept = uniq(acceptHeaders)
+      .filter(Boolean)
+      .join(",");
+    return;
+  }
+
+  options.url += options.url.indexOf("?") === -1 ? "?" : "&";
+
+  if (state.auth.token) {
+    options.url += `access_token=${encodeURIComponent(state.auth.token)}`;
+    return;
+  }
+
+  const key = encodeURIComponent(state.auth.key);
+  const secret = encodeURIComponent(state.auth.secret);
+  options.url += `client_id=${key}&client_secret=${secret}`;
+}
+
+
+/***/ }),
+
+/***/ 492:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = authenticationRequestError;
+
+const { RequestError } = __webpack_require__(552);
+
+function authenticationRequestError(state, error, options) {
+  if (!error.headers) throw error;
+
+  const otpRequired = /required/.test(error.headers["x-github-otp"] || "");
+  // handle "2FA required" error only
+  if (error.status !== 401 || !otpRequired) {
+    throw error;
+  }
+
+  if (
+    error.status === 401 &&
+    otpRequired &&
+    error.request &&
+    error.request.headers["x-github-otp"]
+  ) {
+    if (state.otp) {
+      delete state.otp; // no longer valid, request again
+    } else {
+      throw new RequestError(
+        "Invalid one-time password for two-factor authentication",
+        401,
+        {
+          headers: error.headers,
+          request: options
+        }
+      );
+    }
+  }
+
+  if (typeof state.auth.on2fa !== "function") {
+    throw new RequestError(
+      "2FA required, but options.on2fa is not a function. See https://github.com/octokit/rest.js#authentication",
+      401,
+      {
+        headers: error.headers,
+        request: options
+      }
+    );
+  }
+
+  return Promise.resolve()
+    .then(() => {
+      return state.auth.on2fa();
+    })
+    .then(oneTimePassword => {
+      const newOptions = Object.assign(options, {
+        headers: Object.assign(options.headers, {
+          "x-github-otp": oneTimePassword
+        })
+      });
+      return state.octokit.request(newOptions).then(response => {
+        // If OTP still valid, then persist it for following requests
+        state.otp = oneTimePassword;
+        return response;
+      });
+    });
+}
 
 
 /***/ }),
@@ -8199,6 +24235,28 @@ function range(a, b, str) {
 
 /***/ }),
 
+/***/ 504:
+/***/ (function(module) {
+
+module.exports = class HttpError extends Error {
+  constructor (message, code, headers) {
+    super(message)
+
+    // Maintains proper stack trace (only available on V8)
+    /* istanbul ignore next */
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, this.constructor)
+    }
+
+    this.name = 'HttpError'
+    this.code = code
+    this.headers = headers
+  }
+}
+
+
+/***/ }),
+
 /***/ 522:
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
 
@@ -8292,6 +24350,23 @@ function createGZipFileInBuffer(originalFilePath) {
 }
 exports.createGZipFileInBuffer = createGZipFileInBuffer;
 //# sourceMappingURL=upload-gzip.js.map
+
+/***/ }),
+
+/***/ 535:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = factory;
+
+const Octokit = __webpack_require__(963);
+const registerPlugin = __webpack_require__(429);
+
+function factory(plugins) {
+  const Api = Octokit.bind(null, plugins || []);
+  Api.plugin = registerPlugin.bind(null, plugins || []);
+  return Api;
+}
+
 
 /***/ }),
 
@@ -8676,6 +24751,1007 @@ exports.DownloadHttpClient = DownloadHttpClient;
 
 /***/ }),
 
+/***/ 552:
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+
+Object.defineProperty(exports, '__esModule', { value: true });
+
+function _interopDefault (ex) { return (ex && (typeof ex === 'object') && 'default' in ex) ? ex['default'] : ex; }
+
+var deprecation = __webpack_require__(593);
+var once = _interopDefault(__webpack_require__(870));
+
+const logOnce = once(deprecation => console.warn(deprecation));
+/**
+ * Error with extra properties to help with debugging
+ */
+
+class RequestError extends Error {
+  constructor(message, statusCode, options) {
+    super(message); // Maintains proper stack trace (only available on V8)
+
+    /* istanbul ignore next */
+
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, this.constructor);
+    }
+
+    this.name = "HttpError";
+    this.status = statusCode;
+    Object.defineProperty(this, "code", {
+      get() {
+        logOnce(new deprecation.Deprecation("[@octokit/request-error] `error.code` is deprecated, use `error.status`."));
+        return statusCode;
+      }
+
+    });
+    this.headers = options.headers || {}; // redact request credentials without mutating original request options
+
+    const requestCopy = Object.assign({}, options.request);
+
+    if (options.request.headers.authorization) {
+      requestCopy.headers = Object.assign({}, options.request.headers, {
+        authorization: options.request.headers.authorization.replace(/ .*$/, " [REDACTED]")
+      });
+    }
+
+    requestCopy.url = requestCopy.url // client_id & client_secret can be passed as URL query parameters to increase rate limit
+    // see https://developer.github.com/v3/#increasing-the-unauthenticated-rate-limit-for-oauth-applications
+    .replace(/\bclient_secret=\w+/g, "client_secret=[REDACTED]") // OAuth tokens can be passed as URL query parameters, although it is not recommended
+    // see https://developer.github.com/v3/#oauth2-token-sent-in-a-header
+    .replace(/\baccess_token=\w+/g, "access_token=[REDACTED]");
+    this.request = requestCopy;
+  }
+
+}
+
+exports.RequestError = RequestError;
+//# sourceMappingURL=index.js.map
+
+
+/***/ }),
+
+/***/ 562:
+/***/ (function(module) {
+
+/**
+ * lodash (Custom Build) <https://lodash.com/>
+ * Build: `lodash modularize exports="npm" -o ./`
+ * Copyright jQuery Foundation and other contributors <https://jquery.org/>
+ * Released under MIT license <https://lodash.com/license>
+ * Based on Underscore.js 1.8.3 <http://underscorejs.org/LICENSE>
+ * Copyright Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
+ */
+
+/** Used as the `TypeError` message for "Functions" methods. */
+var FUNC_ERROR_TEXT = 'Expected a function';
+
+/** Used to stand-in for `undefined` hash values. */
+var HASH_UNDEFINED = '__lodash_hash_undefined__';
+
+/** Used as references for various `Number` constants. */
+var INFINITY = 1 / 0;
+
+/** `Object#toString` result references. */
+var funcTag = '[object Function]',
+    genTag = '[object GeneratorFunction]',
+    symbolTag = '[object Symbol]';
+
+/** Used to match property names within property paths. */
+var reIsDeepProp = /\.|\[(?:[^[\]]*|(["'])(?:(?!\1)[^\\]|\\.)*?\1)\]/,
+    reIsPlainProp = /^\w*$/,
+    reLeadingDot = /^\./,
+    rePropName = /[^.[\]]+|\[(?:(-?\d+(?:\.\d+)?)|(["'])((?:(?!\2)[^\\]|\\.)*?)\2)\]|(?=(?:\.|\[\])(?:\.|\[\]|$))/g;
+
+/**
+ * Used to match `RegExp`
+ * [syntax characters](http://ecma-international.org/ecma-262/7.0/#sec-patterns).
+ */
+var reRegExpChar = /[\\^$.*+?()[\]{}|]/g;
+
+/** Used to match backslashes in property paths. */
+var reEscapeChar = /\\(\\)?/g;
+
+/** Used to detect host constructors (Safari). */
+var reIsHostCtor = /^\[object .+?Constructor\]$/;
+
+/** Detect free variable `global` from Node.js. */
+var freeGlobal = typeof global == 'object' && global && global.Object === Object && global;
+
+/** Detect free variable `self`. */
+var freeSelf = typeof self == 'object' && self && self.Object === Object && self;
+
+/** Used as a reference to the global object. */
+var root = freeGlobal || freeSelf || Function('return this')();
+
+/**
+ * Gets the value at `key` of `object`.
+ *
+ * @private
+ * @param {Object} [object] The object to query.
+ * @param {string} key The key of the property to get.
+ * @returns {*} Returns the property value.
+ */
+function getValue(object, key) {
+  return object == null ? undefined : object[key];
+}
+
+/**
+ * Checks if `value` is a host object in IE < 9.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a host object, else `false`.
+ */
+function isHostObject(value) {
+  // Many host objects are `Object` objects that can coerce to strings
+  // despite having improperly defined `toString` methods.
+  var result = false;
+  if (value != null && typeof value.toString != 'function') {
+    try {
+      result = !!(value + '');
+    } catch (e) {}
+  }
+  return result;
+}
+
+/** Used for built-in method references. */
+var arrayProto = Array.prototype,
+    funcProto = Function.prototype,
+    objectProto = Object.prototype;
+
+/** Used to detect overreaching core-js shims. */
+var coreJsData = root['__core-js_shared__'];
+
+/** Used to detect methods masquerading as native. */
+var maskSrcKey = (function() {
+  var uid = /[^.]+$/.exec(coreJsData && coreJsData.keys && coreJsData.keys.IE_PROTO || '');
+  return uid ? ('Symbol(src)_1.' + uid) : '';
+}());
+
+/** Used to resolve the decompiled source of functions. */
+var funcToString = funcProto.toString;
+
+/** Used to check objects for own properties. */
+var hasOwnProperty = objectProto.hasOwnProperty;
+
+/**
+ * Used to resolve the
+ * [`toStringTag`](http://ecma-international.org/ecma-262/7.0/#sec-object.prototype.tostring)
+ * of values.
+ */
+var objectToString = objectProto.toString;
+
+/** Used to detect if a method is native. */
+var reIsNative = RegExp('^' +
+  funcToString.call(hasOwnProperty).replace(reRegExpChar, '\\$&')
+  .replace(/hasOwnProperty|(function).*?(?=\\\()| for .+?(?=\\\])/g, '$1.*?') + '$'
+);
+
+/** Built-in value references. */
+var Symbol = root.Symbol,
+    splice = arrayProto.splice;
+
+/* Built-in method references that are verified to be native. */
+var Map = getNative(root, 'Map'),
+    nativeCreate = getNative(Object, 'create');
+
+/** Used to convert symbols to primitives and strings. */
+var symbolProto = Symbol ? Symbol.prototype : undefined,
+    symbolToString = symbolProto ? symbolProto.toString : undefined;
+
+/**
+ * Creates a hash object.
+ *
+ * @private
+ * @constructor
+ * @param {Array} [entries] The key-value pairs to cache.
+ */
+function Hash(entries) {
+  var index = -1,
+      length = entries ? entries.length : 0;
+
+  this.clear();
+  while (++index < length) {
+    var entry = entries[index];
+    this.set(entry[0], entry[1]);
+  }
+}
+
+/**
+ * Removes all key-value entries from the hash.
+ *
+ * @private
+ * @name clear
+ * @memberOf Hash
+ */
+function hashClear() {
+  this.__data__ = nativeCreate ? nativeCreate(null) : {};
+}
+
+/**
+ * Removes `key` and its value from the hash.
+ *
+ * @private
+ * @name delete
+ * @memberOf Hash
+ * @param {Object} hash The hash to modify.
+ * @param {string} key The key of the value to remove.
+ * @returns {boolean} Returns `true` if the entry was removed, else `false`.
+ */
+function hashDelete(key) {
+  return this.has(key) && delete this.__data__[key];
+}
+
+/**
+ * Gets the hash value for `key`.
+ *
+ * @private
+ * @name get
+ * @memberOf Hash
+ * @param {string} key The key of the value to get.
+ * @returns {*} Returns the entry value.
+ */
+function hashGet(key) {
+  var data = this.__data__;
+  if (nativeCreate) {
+    var result = data[key];
+    return result === HASH_UNDEFINED ? undefined : result;
+  }
+  return hasOwnProperty.call(data, key) ? data[key] : undefined;
+}
+
+/**
+ * Checks if a hash value for `key` exists.
+ *
+ * @private
+ * @name has
+ * @memberOf Hash
+ * @param {string} key The key of the entry to check.
+ * @returns {boolean} Returns `true` if an entry for `key` exists, else `false`.
+ */
+function hashHas(key) {
+  var data = this.__data__;
+  return nativeCreate ? data[key] !== undefined : hasOwnProperty.call(data, key);
+}
+
+/**
+ * Sets the hash `key` to `value`.
+ *
+ * @private
+ * @name set
+ * @memberOf Hash
+ * @param {string} key The key of the value to set.
+ * @param {*} value The value to set.
+ * @returns {Object} Returns the hash instance.
+ */
+function hashSet(key, value) {
+  var data = this.__data__;
+  data[key] = (nativeCreate && value === undefined) ? HASH_UNDEFINED : value;
+  return this;
+}
+
+// Add methods to `Hash`.
+Hash.prototype.clear = hashClear;
+Hash.prototype['delete'] = hashDelete;
+Hash.prototype.get = hashGet;
+Hash.prototype.has = hashHas;
+Hash.prototype.set = hashSet;
+
+/**
+ * Creates an list cache object.
+ *
+ * @private
+ * @constructor
+ * @param {Array} [entries] The key-value pairs to cache.
+ */
+function ListCache(entries) {
+  var index = -1,
+      length = entries ? entries.length : 0;
+
+  this.clear();
+  while (++index < length) {
+    var entry = entries[index];
+    this.set(entry[0], entry[1]);
+  }
+}
+
+/**
+ * Removes all key-value entries from the list cache.
+ *
+ * @private
+ * @name clear
+ * @memberOf ListCache
+ */
+function listCacheClear() {
+  this.__data__ = [];
+}
+
+/**
+ * Removes `key` and its value from the list cache.
+ *
+ * @private
+ * @name delete
+ * @memberOf ListCache
+ * @param {string} key The key of the value to remove.
+ * @returns {boolean} Returns `true` if the entry was removed, else `false`.
+ */
+function listCacheDelete(key) {
+  var data = this.__data__,
+      index = assocIndexOf(data, key);
+
+  if (index < 0) {
+    return false;
+  }
+  var lastIndex = data.length - 1;
+  if (index == lastIndex) {
+    data.pop();
+  } else {
+    splice.call(data, index, 1);
+  }
+  return true;
+}
+
+/**
+ * Gets the list cache value for `key`.
+ *
+ * @private
+ * @name get
+ * @memberOf ListCache
+ * @param {string} key The key of the value to get.
+ * @returns {*} Returns the entry value.
+ */
+function listCacheGet(key) {
+  var data = this.__data__,
+      index = assocIndexOf(data, key);
+
+  return index < 0 ? undefined : data[index][1];
+}
+
+/**
+ * Checks if a list cache value for `key` exists.
+ *
+ * @private
+ * @name has
+ * @memberOf ListCache
+ * @param {string} key The key of the entry to check.
+ * @returns {boolean} Returns `true` if an entry for `key` exists, else `false`.
+ */
+function listCacheHas(key) {
+  return assocIndexOf(this.__data__, key) > -1;
+}
+
+/**
+ * Sets the list cache `key` to `value`.
+ *
+ * @private
+ * @name set
+ * @memberOf ListCache
+ * @param {string} key The key of the value to set.
+ * @param {*} value The value to set.
+ * @returns {Object} Returns the list cache instance.
+ */
+function listCacheSet(key, value) {
+  var data = this.__data__,
+      index = assocIndexOf(data, key);
+
+  if (index < 0) {
+    data.push([key, value]);
+  } else {
+    data[index][1] = value;
+  }
+  return this;
+}
+
+// Add methods to `ListCache`.
+ListCache.prototype.clear = listCacheClear;
+ListCache.prototype['delete'] = listCacheDelete;
+ListCache.prototype.get = listCacheGet;
+ListCache.prototype.has = listCacheHas;
+ListCache.prototype.set = listCacheSet;
+
+/**
+ * Creates a map cache object to store key-value pairs.
+ *
+ * @private
+ * @constructor
+ * @param {Array} [entries] The key-value pairs to cache.
+ */
+function MapCache(entries) {
+  var index = -1,
+      length = entries ? entries.length : 0;
+
+  this.clear();
+  while (++index < length) {
+    var entry = entries[index];
+    this.set(entry[0], entry[1]);
+  }
+}
+
+/**
+ * Removes all key-value entries from the map.
+ *
+ * @private
+ * @name clear
+ * @memberOf MapCache
+ */
+function mapCacheClear() {
+  this.__data__ = {
+    'hash': new Hash,
+    'map': new (Map || ListCache),
+    'string': new Hash
+  };
+}
+
+/**
+ * Removes `key` and its value from the map.
+ *
+ * @private
+ * @name delete
+ * @memberOf MapCache
+ * @param {string} key The key of the value to remove.
+ * @returns {boolean} Returns `true` if the entry was removed, else `false`.
+ */
+function mapCacheDelete(key) {
+  return getMapData(this, key)['delete'](key);
+}
+
+/**
+ * Gets the map value for `key`.
+ *
+ * @private
+ * @name get
+ * @memberOf MapCache
+ * @param {string} key The key of the value to get.
+ * @returns {*} Returns the entry value.
+ */
+function mapCacheGet(key) {
+  return getMapData(this, key).get(key);
+}
+
+/**
+ * Checks if a map value for `key` exists.
+ *
+ * @private
+ * @name has
+ * @memberOf MapCache
+ * @param {string} key The key of the entry to check.
+ * @returns {boolean} Returns `true` if an entry for `key` exists, else `false`.
+ */
+function mapCacheHas(key) {
+  return getMapData(this, key).has(key);
+}
+
+/**
+ * Sets the map `key` to `value`.
+ *
+ * @private
+ * @name set
+ * @memberOf MapCache
+ * @param {string} key The key of the value to set.
+ * @param {*} value The value to set.
+ * @returns {Object} Returns the map cache instance.
+ */
+function mapCacheSet(key, value) {
+  getMapData(this, key).set(key, value);
+  return this;
+}
+
+// Add methods to `MapCache`.
+MapCache.prototype.clear = mapCacheClear;
+MapCache.prototype['delete'] = mapCacheDelete;
+MapCache.prototype.get = mapCacheGet;
+MapCache.prototype.has = mapCacheHas;
+MapCache.prototype.set = mapCacheSet;
+
+/**
+ * Gets the index at which the `key` is found in `array` of key-value pairs.
+ *
+ * @private
+ * @param {Array} array The array to inspect.
+ * @param {*} key The key to search for.
+ * @returns {number} Returns the index of the matched value, else `-1`.
+ */
+function assocIndexOf(array, key) {
+  var length = array.length;
+  while (length--) {
+    if (eq(array[length][0], key)) {
+      return length;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The base implementation of `_.get` without support for default values.
+ *
+ * @private
+ * @param {Object} object The object to query.
+ * @param {Array|string} path The path of the property to get.
+ * @returns {*} Returns the resolved value.
+ */
+function baseGet(object, path) {
+  path = isKey(path, object) ? [path] : castPath(path);
+
+  var index = 0,
+      length = path.length;
+
+  while (object != null && index < length) {
+    object = object[toKey(path[index++])];
+  }
+  return (index && index == length) ? object : undefined;
+}
+
+/**
+ * The base implementation of `_.isNative` without bad shim checks.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a native function,
+ *  else `false`.
+ */
+function baseIsNative(value) {
+  if (!isObject(value) || isMasked(value)) {
+    return false;
+  }
+  var pattern = (isFunction(value) || isHostObject(value)) ? reIsNative : reIsHostCtor;
+  return pattern.test(toSource(value));
+}
+
+/**
+ * The base implementation of `_.toString` which doesn't convert nullish
+ * values to empty strings.
+ *
+ * @private
+ * @param {*} value The value to process.
+ * @returns {string} Returns the string.
+ */
+function baseToString(value) {
+  // Exit early for strings to avoid a performance hit in some environments.
+  if (typeof value == 'string') {
+    return value;
+  }
+  if (isSymbol(value)) {
+    return symbolToString ? symbolToString.call(value) : '';
+  }
+  var result = (value + '');
+  return (result == '0' && (1 / value) == -INFINITY) ? '-0' : result;
+}
+
+/**
+ * Casts `value` to a path array if it's not one.
+ *
+ * @private
+ * @param {*} value The value to inspect.
+ * @returns {Array} Returns the cast property path array.
+ */
+function castPath(value) {
+  return isArray(value) ? value : stringToPath(value);
+}
+
+/**
+ * Gets the data for `map`.
+ *
+ * @private
+ * @param {Object} map The map to query.
+ * @param {string} key The reference key.
+ * @returns {*} Returns the map data.
+ */
+function getMapData(map, key) {
+  var data = map.__data__;
+  return isKeyable(key)
+    ? data[typeof key == 'string' ? 'string' : 'hash']
+    : data.map;
+}
+
+/**
+ * Gets the native function at `key` of `object`.
+ *
+ * @private
+ * @param {Object} object The object to query.
+ * @param {string} key The key of the method to get.
+ * @returns {*} Returns the function if it's native, else `undefined`.
+ */
+function getNative(object, key) {
+  var value = getValue(object, key);
+  return baseIsNative(value) ? value : undefined;
+}
+
+/**
+ * Checks if `value` is a property name and not a property path.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @param {Object} [object] The object to query keys on.
+ * @returns {boolean} Returns `true` if `value` is a property name, else `false`.
+ */
+function isKey(value, object) {
+  if (isArray(value)) {
+    return false;
+  }
+  var type = typeof value;
+  if (type == 'number' || type == 'symbol' || type == 'boolean' ||
+      value == null || isSymbol(value)) {
+    return true;
+  }
+  return reIsPlainProp.test(value) || !reIsDeepProp.test(value) ||
+    (object != null && value in Object(object));
+}
+
+/**
+ * Checks if `value` is suitable for use as unique object key.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is suitable, else `false`.
+ */
+function isKeyable(value) {
+  var type = typeof value;
+  return (type == 'string' || type == 'number' || type == 'symbol' || type == 'boolean')
+    ? (value !== '__proto__')
+    : (value === null);
+}
+
+/**
+ * Checks if `func` has its source masked.
+ *
+ * @private
+ * @param {Function} func The function to check.
+ * @returns {boolean} Returns `true` if `func` is masked, else `false`.
+ */
+function isMasked(func) {
+  return !!maskSrcKey && (maskSrcKey in func);
+}
+
+/**
+ * Converts `string` to a property path array.
+ *
+ * @private
+ * @param {string} string The string to convert.
+ * @returns {Array} Returns the property path array.
+ */
+var stringToPath = memoize(function(string) {
+  string = toString(string);
+
+  var result = [];
+  if (reLeadingDot.test(string)) {
+    result.push('');
+  }
+  string.replace(rePropName, function(match, number, quote, string) {
+    result.push(quote ? string.replace(reEscapeChar, '$1') : (number || match));
+  });
+  return result;
+});
+
+/**
+ * Converts `value` to a string key if it's not a string or symbol.
+ *
+ * @private
+ * @param {*} value The value to inspect.
+ * @returns {string|symbol} Returns the key.
+ */
+function toKey(value) {
+  if (typeof value == 'string' || isSymbol(value)) {
+    return value;
+  }
+  var result = (value + '');
+  return (result == '0' && (1 / value) == -INFINITY) ? '-0' : result;
+}
+
+/**
+ * Converts `func` to its source code.
+ *
+ * @private
+ * @param {Function} func The function to process.
+ * @returns {string} Returns the source code.
+ */
+function toSource(func) {
+  if (func != null) {
+    try {
+      return funcToString.call(func);
+    } catch (e) {}
+    try {
+      return (func + '');
+    } catch (e) {}
+  }
+  return '';
+}
+
+/**
+ * Creates a function that memoizes the result of `func`. If `resolver` is
+ * provided, it determines the cache key for storing the result based on the
+ * arguments provided to the memoized function. By default, the first argument
+ * provided to the memoized function is used as the map cache key. The `func`
+ * is invoked with the `this` binding of the memoized function.
+ *
+ * **Note:** The cache is exposed as the `cache` property on the memoized
+ * function. Its creation may be customized by replacing the `_.memoize.Cache`
+ * constructor with one whose instances implement the
+ * [`Map`](http://ecma-international.org/ecma-262/7.0/#sec-properties-of-the-map-prototype-object)
+ * method interface of `delete`, `get`, `has`, and `set`.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Function
+ * @param {Function} func The function to have its output memoized.
+ * @param {Function} [resolver] The function to resolve the cache key.
+ * @returns {Function} Returns the new memoized function.
+ * @example
+ *
+ * var object = { 'a': 1, 'b': 2 };
+ * var other = { 'c': 3, 'd': 4 };
+ *
+ * var values = _.memoize(_.values);
+ * values(object);
+ * // => [1, 2]
+ *
+ * values(other);
+ * // => [3, 4]
+ *
+ * object.a = 2;
+ * values(object);
+ * // => [1, 2]
+ *
+ * // Modify the result cache.
+ * values.cache.set(object, ['a', 'b']);
+ * values(object);
+ * // => ['a', 'b']
+ *
+ * // Replace `_.memoize.Cache`.
+ * _.memoize.Cache = WeakMap;
+ */
+function memoize(func, resolver) {
+  if (typeof func != 'function' || (resolver && typeof resolver != 'function')) {
+    throw new TypeError(FUNC_ERROR_TEXT);
+  }
+  var memoized = function() {
+    var args = arguments,
+        key = resolver ? resolver.apply(this, args) : args[0],
+        cache = memoized.cache;
+
+    if (cache.has(key)) {
+      return cache.get(key);
+    }
+    var result = func.apply(this, args);
+    memoized.cache = cache.set(key, result);
+    return result;
+  };
+  memoized.cache = new (memoize.Cache || MapCache);
+  return memoized;
+}
+
+// Assign cache to `_.memoize`.
+memoize.Cache = MapCache;
+
+/**
+ * Performs a
+ * [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
+ * comparison between two values to determine if they are equivalent.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to compare.
+ * @param {*} other The other value to compare.
+ * @returns {boolean} Returns `true` if the values are equivalent, else `false`.
+ * @example
+ *
+ * var object = { 'a': 1 };
+ * var other = { 'a': 1 };
+ *
+ * _.eq(object, object);
+ * // => true
+ *
+ * _.eq(object, other);
+ * // => false
+ *
+ * _.eq('a', 'a');
+ * // => true
+ *
+ * _.eq('a', Object('a'));
+ * // => false
+ *
+ * _.eq(NaN, NaN);
+ * // => true
+ */
+function eq(value, other) {
+  return value === other || (value !== value && other !== other);
+}
+
+/**
+ * Checks if `value` is classified as an `Array` object.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is an array, else `false`.
+ * @example
+ *
+ * _.isArray([1, 2, 3]);
+ * // => true
+ *
+ * _.isArray(document.body.children);
+ * // => false
+ *
+ * _.isArray('abc');
+ * // => false
+ *
+ * _.isArray(_.noop);
+ * // => false
+ */
+var isArray = Array.isArray;
+
+/**
+ * Checks if `value` is classified as a `Function` object.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a function, else `false`.
+ * @example
+ *
+ * _.isFunction(_);
+ * // => true
+ *
+ * _.isFunction(/abc/);
+ * // => false
+ */
+function isFunction(value) {
+  // The use of `Object#toString` avoids issues with the `typeof` operator
+  // in Safari 8-9 which returns 'object' for typed array and other constructors.
+  var tag = isObject(value) ? objectToString.call(value) : '';
+  return tag == funcTag || tag == genTag;
+}
+
+/**
+ * Checks if `value` is the
+ * [language type](http://www.ecma-international.org/ecma-262/7.0/#sec-ecmascript-language-types)
+ * of `Object`. (e.g. arrays, functions, objects, regexes, `new Number(0)`, and `new String('')`)
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is an object, else `false`.
+ * @example
+ *
+ * _.isObject({});
+ * // => true
+ *
+ * _.isObject([1, 2, 3]);
+ * // => true
+ *
+ * _.isObject(_.noop);
+ * // => true
+ *
+ * _.isObject(null);
+ * // => false
+ */
+function isObject(value) {
+  var type = typeof value;
+  return !!value && (type == 'object' || type == 'function');
+}
+
+/**
+ * Checks if `value` is object-like. A value is object-like if it's not `null`
+ * and has a `typeof` result of "object".
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is object-like, else `false`.
+ * @example
+ *
+ * _.isObjectLike({});
+ * // => true
+ *
+ * _.isObjectLike([1, 2, 3]);
+ * // => true
+ *
+ * _.isObjectLike(_.noop);
+ * // => false
+ *
+ * _.isObjectLike(null);
+ * // => false
+ */
+function isObjectLike(value) {
+  return !!value && typeof value == 'object';
+}
+
+/**
+ * Checks if `value` is classified as a `Symbol` primitive or object.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a symbol, else `false`.
+ * @example
+ *
+ * _.isSymbol(Symbol.iterator);
+ * // => true
+ *
+ * _.isSymbol('abc');
+ * // => false
+ */
+function isSymbol(value) {
+  return typeof value == 'symbol' ||
+    (isObjectLike(value) && objectToString.call(value) == symbolTag);
+}
+
+/**
+ * Converts `value` to a string. An empty string is returned for `null`
+ * and `undefined` values. The sign of `-0` is preserved.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to process.
+ * @returns {string} Returns the string.
+ * @example
+ *
+ * _.toString(null);
+ * // => ''
+ *
+ * _.toString(-0);
+ * // => '-0'
+ *
+ * _.toString([1, 2, 3]);
+ * // => '1,2,3'
+ */
+function toString(value) {
+  return value == null ? '' : baseToString(value);
+}
+
+/**
+ * Gets the value at `path` of `object`. If the resolved value is
+ * `undefined`, the `defaultValue` is returned in its place.
+ *
+ * @static
+ * @memberOf _
+ * @since 3.7.0
+ * @category Object
+ * @param {Object} object The object to query.
+ * @param {Array|string} path The path of the property to get.
+ * @param {*} [defaultValue] The value returned for `undefined` resolved values.
+ * @returns {*} Returns the resolved value.
+ * @example
+ *
+ * var object = { 'a': [{ 'b': { 'c': 3 } }] };
+ *
+ * _.get(object, 'a[0].b.c');
+ * // => 3
+ *
+ * _.get(object, ['a', '0', 'b', 'c']);
+ * // => 3
+ *
+ * _.get(object, 'a.b.c', 'default');
+ * // => 'default'
+ */
+function get(object, path, defaultValue) {
+  var result = object == null ? undefined : baseGet(object, path);
+  return result === undefined ? defaultValue : result;
+}
+
+module.exports = get;
+
+
+/***/ }),
+
 /***/ 566:
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
 
@@ -8729,6 +25805,118 @@ module.exports = function (x) {
 
 /***/ }),
 
+/***/ 572:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = hasPreviousPage
+
+const deprecate = __webpack_require__(307)
+const getPageLinks = __webpack_require__(327)
+
+function hasPreviousPage (link) {
+  deprecate(`octokit.hasPreviousPage() – You can use octokit.paginate or async iterators instead: https://github.com/octokit/rest.js#pagination.`)
+  return getPageLinks(link).prev
+}
+
+
+/***/ }),
+
+/***/ 575:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = parseOptions;
+
+const { Deprecation } = __webpack_require__(593);
+const { getUserAgent } = __webpack_require__(46);
+const once = __webpack_require__(870);
+
+const pkg = __webpack_require__(83);
+
+const deprecateOptionsTimeout = once((log, deprecation) =>
+  log.warn(deprecation)
+);
+const deprecateOptionsAgent = once((log, deprecation) => log.warn(deprecation));
+const deprecateOptionsHeaders = once((log, deprecation) =>
+  log.warn(deprecation)
+);
+
+function parseOptions(options, log, hook) {
+  if (options.headers) {
+    options.headers = Object.keys(options.headers).reduce((newObj, key) => {
+      newObj[key.toLowerCase()] = options.headers[key];
+      return newObj;
+    }, {});
+  }
+
+  const clientDefaults = {
+    headers: options.headers || {},
+    request: options.request || {},
+    mediaType: {
+      previews: [],
+      format: ""
+    }
+  };
+
+  if (options.baseUrl) {
+    clientDefaults.baseUrl = options.baseUrl;
+  }
+
+  if (options.userAgent) {
+    clientDefaults.headers["user-agent"] = options.userAgent;
+  }
+
+  if (options.previews) {
+    clientDefaults.mediaType.previews = options.previews;
+  }
+
+  if (options.timeZone) {
+    clientDefaults.headers["time-zone"] = options.timeZone;
+  }
+
+  if (options.timeout) {
+    deprecateOptionsTimeout(
+      log,
+      new Deprecation(
+        "[@octokit/rest] new Octokit({timeout}) is deprecated. Use {request: {timeout}} instead. See https://github.com/octokit/request.js#request"
+      )
+    );
+    clientDefaults.request.timeout = options.timeout;
+  }
+
+  if (options.agent) {
+    deprecateOptionsAgent(
+      log,
+      new Deprecation(
+        "[@octokit/rest] new Octokit({agent}) is deprecated. Use {request: {agent}} instead. See https://github.com/octokit/request.js#request"
+      )
+    );
+    clientDefaults.request.agent = options.agent;
+  }
+
+  if (options.headers) {
+    deprecateOptionsHeaders(
+      log,
+      new Deprecation(
+        "[@octokit/rest] new Octokit({headers}) is deprecated. Use {userAgent, previews} instead. See https://github.com/octokit/request.js#request"
+      )
+    );
+  }
+
+  const userAgentOption = clientDefaults.headers["user-agent"];
+  const defaultUserAgent = `octokit.js/${pkg.version} ${getUserAgent()}`;
+
+  clientDefaults.headers["user-agent"] = [userAgentOption, defaultUserAgent]
+    .filter(Boolean)
+    .join(" ");
+
+  clientDefaults.request.hook = hook.bind(null, "request");
+
+  return clientDefaults;
+}
+
+
+/***/ }),
+
 /***/ 582:
 /***/ (function(module) {
 
@@ -8777,6 +25965,25 @@ function addHook (state, kind, name, hook) {
     hook: hook,
     orig: orig
   })
+}
+
+
+/***/ }),
+
+/***/ 588:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = paginationMethodsPlugin
+
+function paginationMethodsPlugin (octokit) {
+  octokit.getFirstPage = __webpack_require__(2).bind(null, octokit)
+  octokit.getLastPage = __webpack_require__(281).bind(null, octokit)
+  octokit.getNextPage = __webpack_require__(981).bind(null, octokit)
+  octokit.getPreviousPage = __webpack_require__(309).bind(null, octokit)
+  octokit.hasFirstPage = __webpack_require__(170)
+  octokit.hasLastPage = __webpack_require__(15)
+  octokit.hasNextPage = __webpack_require__(662)
+  octokit.hasPreviousPage = __webpack_require__(572)
 }
 
 
@@ -8870,6 +26077,56 @@ module.exports = require("http");
 
 /***/ }),
 
+/***/ 606:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+const { requestLog } = __webpack_require__(721);
+const {
+  restEndpointMethods
+} = __webpack_require__(19);
+
+const Core = __webpack_require__(689);
+
+const CORE_PLUGINS = [
+  __webpack_require__(265),
+  __webpack_require__(359), // deprecated: remove in v17
+  requestLog,
+  __webpack_require__(48),
+  restEndpointMethods,
+  __webpack_require__(5),
+
+  __webpack_require__(588) // deprecated: remove in v17
+];
+
+const OctokitRest = Core.plugin(CORE_PLUGINS);
+
+function DeprecatedOctokit(options) {
+  const warn =
+    options && options.log && options.log.warn
+      ? options.log.warn
+      : console.warn;
+  warn(
+    '[@octokit/rest] `const Octokit = require("@octokit/rest")` is deprecated. Use `const { Octokit } = require("@octokit/rest")` instead'
+  );
+  return new OctokitRest(options);
+}
+
+const Octokit = Object.assign(DeprecatedOctokit, {
+  Octokit: OctokitRest
+});
+
+Object.keys(OctokitRest).forEach(key => {
+  /* istanbul ignore else */
+  if (OctokitRest.hasOwnProperty(key)) {
+    Octokit[key] = OctokitRest[key];
+  }
+});
+
+module.exports = Octokit;
+
+
+/***/ }),
+
 /***/ 614:
 /***/ (function(module) {
 
@@ -8877,11 +26134,71 @@ module.exports = require("events");
 
 /***/ }),
 
+/***/ 618:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = authenticationBeforeRequest;
+
+const btoa = __webpack_require__(730);
+
+const withAuthorizationPrefix = __webpack_require__(398);
+
+function authenticationBeforeRequest(state, options) {
+  if (typeof state.auth === "string") {
+    options.headers.authorization = withAuthorizationPrefix(state.auth);
+    return;
+  }
+
+  if (state.auth.username) {
+    const hash = btoa(`${state.auth.username}:${state.auth.password}`);
+    options.headers.authorization = `Basic ${hash}`;
+    if (state.otp) {
+      options.headers["x-github-otp"] = state.otp;
+    }
+    return;
+  }
+
+  if (state.auth.clientId) {
+    // There is a special case for OAuth applications, when `clientId` and `clientSecret` is passed as
+    // Basic Authorization instead of query parameters. The only routes where that applies share the same
+    // URL though: `/applications/:client_id/tokens/:access_token`.
+    //
+    //  1. [Check an authorization](https://developer.github.com/v3/oauth_authorizations/#check-an-authorization)
+    //  2. [Reset an authorization](https://developer.github.com/v3/oauth_authorizations/#reset-an-authorization)
+    //  3. [Revoke an authorization for an application](https://developer.github.com/v3/oauth_authorizations/#revoke-an-authorization-for-an-application)
+    //
+    // We identify by checking the URL. It must merge both "/applications/:client_id/tokens/:access_token"
+    // as well as "/applications/123/tokens/token456"
+    if (/\/applications\/:?[\w_]+\/tokens\/:?[\w_]+($|\?)/.test(options.url)) {
+      const hash = btoa(`${state.auth.clientId}:${state.auth.clientSecret}`);
+      options.headers.authorization = `Basic ${hash}`;
+      return;
+    }
+
+    options.url += options.url.indexOf("?") === -1 ? "?" : "&";
+    options.url += `client_id=${state.auth.clientId}&client_secret=${state.auth.clientSecret}`;
+    return;
+  }
+
+  return Promise.resolve()
+
+    .then(() => {
+      return state.auth();
+    })
+
+    .then(authorization => {
+      options.headers.authorization = withAuthorizationPrefix(authorization);
+    });
+}
+
+
+/***/ }),
+
 /***/ 622:
 /***/ (function(__unusedmodule, __unusedexports, __webpack_require__) {
 
 const core = __webpack_require__(827);
-const github = __webpack_require__(706);
+const github = __webpack_require__(148);
 const create_annotations_for_results = __webpack_require__(896);
 const xunitViewer = __webpack_require__(208);
 const artifact = __webpack_require__(633);
@@ -8914,6 +26231,165 @@ async function run() {
 }
 
 run()
+
+
+/***/ }),
+
+/***/ 627:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+"use strict";
+
+
+module.exports = validate;
+
+const { RequestError } = __webpack_require__(552);
+const get = __webpack_require__(562);
+const set = __webpack_require__(355);
+
+function validate(octokit, options) {
+  if (!options.request.validate) {
+    return;
+  }
+  const { validate: params } = options.request;
+
+  Object.keys(params).forEach(parameterName => {
+    const parameter = get(params, parameterName);
+
+    const expectedType = parameter.type;
+    let parentParameterName;
+    let parentValue;
+    let parentParamIsPresent = true;
+    let parentParameterIsArray = false;
+
+    if (/\./.test(parameterName)) {
+      parentParameterName = parameterName.replace(/\.[^.]+$/, "");
+      parentParameterIsArray = parentParameterName.slice(-2) === "[]";
+      if (parentParameterIsArray) {
+        parentParameterName = parentParameterName.slice(0, -2);
+      }
+      parentValue = get(options, parentParameterName);
+      parentParamIsPresent =
+        parentParameterName === "headers" ||
+        (typeof parentValue === "object" && parentValue !== null);
+    }
+
+    const values = parentParameterIsArray
+      ? (get(options, parentParameterName) || []).map(
+          value => value[parameterName.split(/\./).pop()]
+        )
+      : [get(options, parameterName)];
+
+    values.forEach((value, i) => {
+      const valueIsPresent = typeof value !== "undefined";
+      const valueIsNull = value === null;
+      const currentParameterName = parentParameterIsArray
+        ? parameterName.replace(/\[\]/, `[${i}]`)
+        : parameterName;
+
+      if (!parameter.required && !valueIsPresent) {
+        return;
+      }
+
+      // if the parent parameter is of type object but allows null
+      // then the child parameters can be ignored
+      if (!parentParamIsPresent) {
+        return;
+      }
+
+      if (parameter.allowNull && valueIsNull) {
+        return;
+      }
+
+      if (!parameter.allowNull && valueIsNull) {
+        throw new RequestError(
+          `'${currentParameterName}' cannot be null`,
+          400,
+          {
+            request: options
+          }
+        );
+      }
+
+      if (parameter.required && !valueIsPresent) {
+        throw new RequestError(
+          `Empty value for parameter '${currentParameterName}': ${JSON.stringify(
+            value
+          )}`,
+          400,
+          {
+            request: options
+          }
+        );
+      }
+
+      // parse to integer before checking for enum
+      // so that string "1" will match enum with number 1
+      if (expectedType === "integer") {
+        const unparsedValue = value;
+        value = parseInt(value, 10);
+        if (isNaN(value)) {
+          throw new RequestError(
+            `Invalid value for parameter '${currentParameterName}': ${JSON.stringify(
+              unparsedValue
+            )} is NaN`,
+            400,
+            {
+              request: options
+            }
+          );
+        }
+      }
+
+      if (parameter.enum && parameter.enum.indexOf(String(value)) === -1) {
+        throw new RequestError(
+          `Invalid value for parameter '${currentParameterName}': ${JSON.stringify(
+            value
+          )}`,
+          400,
+          {
+            request: options
+          }
+        );
+      }
+
+      if (parameter.validation) {
+        const regex = new RegExp(parameter.validation);
+        if (!regex.test(value)) {
+          throw new RequestError(
+            `Invalid value for parameter '${currentParameterName}': ${JSON.stringify(
+              value
+            )}`,
+            400,
+            {
+              request: options
+            }
+          );
+        }
+      }
+
+      if (expectedType === "object" && typeof value === "string") {
+        try {
+          value = JSON.parse(value);
+        } catch (exception) {
+          throw new RequestError(
+            `JSON parse error of value for parameter '${currentParameterName}': ${JSON.stringify(
+              value
+            )}`,
+            400,
+            {
+              request: options
+            }
+          );
+        }
+      }
+
+      set(options, parameter.mapTo || currentParameterName, value);
+    });
+  });
+
+  return options;
+}
 
 
 /***/ }),
@@ -9032,6 +26508,22 @@ exports.create = create;
 
 /***/ }),
 
+/***/ 662:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = hasNextPage
+
+const deprecate = __webpack_require__(307)
+const getPageLinks = __webpack_require__(327)
+
+function hasNextPage (link) {
+  deprecate(`octokit.hasNextPage() – You can use octokit.paginate or async iterators instead: https://github.com/octokit/rest.js#pagination.`)
+  return getPageLinks(link).next
+}
+
+
+/***/ }),
+
 /***/ 669:
 /***/ (function(module) {
 
@@ -9042,929 +26534,9 @@ module.exports = require("util");
 /***/ 689:
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
-module.exports = minimatch
-minimatch.Minimatch = Minimatch
+const factory = __webpack_require__(535);
 
-var path = { sep: '/' }
-try {
-  path = __webpack_require__(277)
-} catch (er) {}
-
-var GLOBSTAR = minimatch.GLOBSTAR = Minimatch.GLOBSTAR = {}
-var expand = __webpack_require__(416)
-
-var plTypes = {
-  '!': { open: '(?:(?!(?:', close: '))[^/]*?)'},
-  '?': { open: '(?:', close: ')?' },
-  '+': { open: '(?:', close: ')+' },
-  '*': { open: '(?:', close: ')*' },
-  '@': { open: '(?:', close: ')' }
-}
-
-// any single thing other than /
-// don't need to escape / when using new RegExp()
-var qmark = '[^/]'
-
-// * => any number of characters
-var star = qmark + '*?'
-
-// ** when dots are allowed.  Anything goes, except .. and .
-// not (^ or / followed by one or two dots followed by $ or /),
-// followed by anything, any number of times.
-var twoStarDot = '(?:(?!(?:\\\/|^)(?:\\.{1,2})($|\\\/)).)*?'
-
-// not a ^ or / followed by a dot,
-// followed by anything, any number of times.
-var twoStarNoDot = '(?:(?!(?:\\\/|^)\\.).)*?'
-
-// characters that need to be escaped in RegExp.
-var reSpecials = charSet('().*{}+?[]^$\\!')
-
-// "abc" -> { a:true, b:true, c:true }
-function charSet (s) {
-  return s.split('').reduce(function (set, c) {
-    set[c] = true
-    return set
-  }, {})
-}
-
-// normalizes slashes.
-var slashSplit = /\/+/
-
-minimatch.filter = filter
-function filter (pattern, options) {
-  options = options || {}
-  return function (p, i, list) {
-    return minimatch(p, pattern, options)
-  }
-}
-
-function ext (a, b) {
-  a = a || {}
-  b = b || {}
-  var t = {}
-  Object.keys(b).forEach(function (k) {
-    t[k] = b[k]
-  })
-  Object.keys(a).forEach(function (k) {
-    t[k] = a[k]
-  })
-  return t
-}
-
-minimatch.defaults = function (def) {
-  if (!def || !Object.keys(def).length) return minimatch
-
-  var orig = minimatch
-
-  var m = function minimatch (p, pattern, options) {
-    return orig.minimatch(p, pattern, ext(def, options))
-  }
-
-  m.Minimatch = function Minimatch (pattern, options) {
-    return new orig.Minimatch(pattern, ext(def, options))
-  }
-
-  return m
-}
-
-Minimatch.defaults = function (def) {
-  if (!def || !Object.keys(def).length) return Minimatch
-  return minimatch.defaults(def).Minimatch
-}
-
-function minimatch (p, pattern, options) {
-  if (typeof pattern !== 'string') {
-    throw new TypeError('glob pattern string required')
-  }
-
-  if (!options) options = {}
-
-  // shortcut: comments match nothing.
-  if (!options.nocomment && pattern.charAt(0) === '#') {
-    return false
-  }
-
-  // "" only matches ""
-  if (pattern.trim() === '') return p === ''
-
-  return new Minimatch(pattern, options).match(p)
-}
-
-function Minimatch (pattern, options) {
-  if (!(this instanceof Minimatch)) {
-    return new Minimatch(pattern, options)
-  }
-
-  if (typeof pattern !== 'string') {
-    throw new TypeError('glob pattern string required')
-  }
-
-  if (!options) options = {}
-  pattern = pattern.trim()
-
-  // windows support: need to use /, not \
-  if (path.sep !== '/') {
-    pattern = pattern.split(path.sep).join('/')
-  }
-
-  this.options = options
-  this.set = []
-  this.pattern = pattern
-  this.regexp = null
-  this.negate = false
-  this.comment = false
-  this.empty = false
-
-  // make the set of regexps etc.
-  this.make()
-}
-
-Minimatch.prototype.debug = function () {}
-
-Minimatch.prototype.make = make
-function make () {
-  // don't do it more than once.
-  if (this._made) return
-
-  var pattern = this.pattern
-  var options = this.options
-
-  // empty patterns and comments match nothing.
-  if (!options.nocomment && pattern.charAt(0) === '#') {
-    this.comment = true
-    return
-  }
-  if (!pattern) {
-    this.empty = true
-    return
-  }
-
-  // step 1: figure out negation, etc.
-  this.parseNegate()
-
-  // step 2: expand braces
-  var set = this.globSet = this.braceExpand()
-
-  if (options.debug) this.debug = console.error
-
-  this.debug(this.pattern, set)
-
-  // step 3: now we have a set, so turn each one into a series of path-portion
-  // matching patterns.
-  // These will be regexps, except in the case of "**", which is
-  // set to the GLOBSTAR object for globstar behavior,
-  // and will not contain any / characters
-  set = this.globParts = set.map(function (s) {
-    return s.split(slashSplit)
-  })
-
-  this.debug(this.pattern, set)
-
-  // glob --> regexps
-  set = set.map(function (s, si, set) {
-    return s.map(this.parse, this)
-  }, this)
-
-  this.debug(this.pattern, set)
-
-  // filter out everything that didn't compile properly.
-  set = set.filter(function (s) {
-    return s.indexOf(false) === -1
-  })
-
-  this.debug(this.pattern, set)
-
-  this.set = set
-}
-
-Minimatch.prototype.parseNegate = parseNegate
-function parseNegate () {
-  var pattern = this.pattern
-  var negate = false
-  var options = this.options
-  var negateOffset = 0
-
-  if (options.nonegate) return
-
-  for (var i = 0, l = pattern.length
-    ; i < l && pattern.charAt(i) === '!'
-    ; i++) {
-    negate = !negate
-    negateOffset++
-  }
-
-  if (negateOffset) this.pattern = pattern.substr(negateOffset)
-  this.negate = negate
-}
-
-// Brace expansion:
-// a{b,c}d -> abd acd
-// a{b,}c -> abc ac
-// a{0..3}d -> a0d a1d a2d a3d
-// a{b,c{d,e}f}g -> abg acdfg acefg
-// a{b,c}d{e,f}g -> abdeg acdeg abdeg abdfg
-//
-// Invalid sets are not expanded.
-// a{2..}b -> a{2..}b
-// a{b}c -> a{b}c
-minimatch.braceExpand = function (pattern, options) {
-  return braceExpand(pattern, options)
-}
-
-Minimatch.prototype.braceExpand = braceExpand
-
-function braceExpand (pattern, options) {
-  if (!options) {
-    if (this instanceof Minimatch) {
-      options = this.options
-    } else {
-      options = {}
-    }
-  }
-
-  pattern = typeof pattern === 'undefined'
-    ? this.pattern : pattern
-
-  if (typeof pattern === 'undefined') {
-    throw new TypeError('undefined pattern')
-  }
-
-  if (options.nobrace ||
-    !pattern.match(/\{.*\}/)) {
-    // shortcut. no need to expand.
-    return [pattern]
-  }
-
-  return expand(pattern)
-}
-
-// parse a component of the expanded set.
-// At this point, no pattern may contain "/" in it
-// so we're going to return a 2d array, where each entry is the full
-// pattern, split on '/', and then turned into a regular expression.
-// A regexp is made at the end which joins each array with an
-// escaped /, and another full one which joins each regexp with |.
-//
-// Following the lead of Bash 4.1, note that "**" only has special meaning
-// when it is the *only* thing in a path portion.  Otherwise, any series
-// of * is equivalent to a single *.  Globstar behavior is enabled by
-// default, and can be disabled by setting options.noglobstar.
-Minimatch.prototype.parse = parse
-var SUBPARSE = {}
-function parse (pattern, isSub) {
-  if (pattern.length > 1024 * 64) {
-    throw new TypeError('pattern is too long')
-  }
-
-  var options = this.options
-
-  // shortcuts
-  if (!options.noglobstar && pattern === '**') return GLOBSTAR
-  if (pattern === '') return ''
-
-  var re = ''
-  var hasMagic = !!options.nocase
-  var escaping = false
-  // ? => one single character
-  var patternListStack = []
-  var negativeLists = []
-  var stateChar
-  var inClass = false
-  var reClassStart = -1
-  var classStart = -1
-  // . and .. never match anything that doesn't start with .,
-  // even when options.dot is set.
-  var patternStart = pattern.charAt(0) === '.' ? '' // anything
-  // not (start or / followed by . or .. followed by / or end)
-  : options.dot ? '(?!(?:^|\\\/)\\.{1,2}(?:$|\\\/))'
-  : '(?!\\.)'
-  var self = this
-
-  function clearStateChar () {
-    if (stateChar) {
-      // we had some state-tracking character
-      // that wasn't consumed by this pass.
-      switch (stateChar) {
-        case '*':
-          re += star
-          hasMagic = true
-        break
-        case '?':
-          re += qmark
-          hasMagic = true
-        break
-        default:
-          re += '\\' + stateChar
-        break
-      }
-      self.debug('clearStateChar %j %j', stateChar, re)
-      stateChar = false
-    }
-  }
-
-  for (var i = 0, len = pattern.length, c
-    ; (i < len) && (c = pattern.charAt(i))
-    ; i++) {
-    this.debug('%s\t%s %s %j', pattern, i, re, c)
-
-    // skip over any that are escaped.
-    if (escaping && reSpecials[c]) {
-      re += '\\' + c
-      escaping = false
-      continue
-    }
-
-    switch (c) {
-      case '/':
-        // completely not allowed, even escaped.
-        // Should already be path-split by now.
-        return false
-
-      case '\\':
-        clearStateChar()
-        escaping = true
-      continue
-
-      // the various stateChar values
-      // for the "extglob" stuff.
-      case '?':
-      case '*':
-      case '+':
-      case '@':
-      case '!':
-        this.debug('%s\t%s %s %j <-- stateChar', pattern, i, re, c)
-
-        // all of those are literals inside a class, except that
-        // the glob [!a] means [^a] in regexp
-        if (inClass) {
-          this.debug('  in class')
-          if (c === '!' && i === classStart + 1) c = '^'
-          re += c
-          continue
-        }
-
-        // if we already have a stateChar, then it means
-        // that there was something like ** or +? in there.
-        // Handle the stateChar, then proceed with this one.
-        self.debug('call clearStateChar %j', stateChar)
-        clearStateChar()
-        stateChar = c
-        // if extglob is disabled, then +(asdf|foo) isn't a thing.
-        // just clear the statechar *now*, rather than even diving into
-        // the patternList stuff.
-        if (options.noext) clearStateChar()
-      continue
-
-      case '(':
-        if (inClass) {
-          re += '('
-          continue
-        }
-
-        if (!stateChar) {
-          re += '\\('
-          continue
-        }
-
-        patternListStack.push({
-          type: stateChar,
-          start: i - 1,
-          reStart: re.length,
-          open: plTypes[stateChar].open,
-          close: plTypes[stateChar].close
-        })
-        // negation is (?:(?!js)[^/]*)
-        re += stateChar === '!' ? '(?:(?!(?:' : '(?:'
-        this.debug('plType %j %j', stateChar, re)
-        stateChar = false
-      continue
-
-      case ')':
-        if (inClass || !patternListStack.length) {
-          re += '\\)'
-          continue
-        }
-
-        clearStateChar()
-        hasMagic = true
-        var pl = patternListStack.pop()
-        // negation is (?:(?!js)[^/]*)
-        // The others are (?:<pattern>)<type>
-        re += pl.close
-        if (pl.type === '!') {
-          negativeLists.push(pl)
-        }
-        pl.reEnd = re.length
-      continue
-
-      case '|':
-        if (inClass || !patternListStack.length || escaping) {
-          re += '\\|'
-          escaping = false
-          continue
-        }
-
-        clearStateChar()
-        re += '|'
-      continue
-
-      // these are mostly the same in regexp and glob
-      case '[':
-        // swallow any state-tracking char before the [
-        clearStateChar()
-
-        if (inClass) {
-          re += '\\' + c
-          continue
-        }
-
-        inClass = true
-        classStart = i
-        reClassStart = re.length
-        re += c
-      continue
-
-      case ']':
-        //  a right bracket shall lose its special
-        //  meaning and represent itself in
-        //  a bracket expression if it occurs
-        //  first in the list.  -- POSIX.2 2.8.3.2
-        if (i === classStart + 1 || !inClass) {
-          re += '\\' + c
-          escaping = false
-          continue
-        }
-
-        // handle the case where we left a class open.
-        // "[z-a]" is valid, equivalent to "\[z-a\]"
-        if (inClass) {
-          // split where the last [ was, make sure we don't have
-          // an invalid re. if so, re-walk the contents of the
-          // would-be class to re-translate any characters that
-          // were passed through as-is
-          // TODO: It would probably be faster to determine this
-          // without a try/catch and a new RegExp, but it's tricky
-          // to do safely.  For now, this is safe and works.
-          var cs = pattern.substring(classStart + 1, i)
-          try {
-            RegExp('[' + cs + ']')
-          } catch (er) {
-            // not a valid class!
-            var sp = this.parse(cs, SUBPARSE)
-            re = re.substr(0, reClassStart) + '\\[' + sp[0] + '\\]'
-            hasMagic = hasMagic || sp[1]
-            inClass = false
-            continue
-          }
-        }
-
-        // finish up the class.
-        hasMagic = true
-        inClass = false
-        re += c
-      continue
-
-      default:
-        // swallow any state char that wasn't consumed
-        clearStateChar()
-
-        if (escaping) {
-          // no need
-          escaping = false
-        } else if (reSpecials[c]
-          && !(c === '^' && inClass)) {
-          re += '\\'
-        }
-
-        re += c
-
-    } // switch
-  } // for
-
-  // handle the case where we left a class open.
-  // "[abc" is valid, equivalent to "\[abc"
-  if (inClass) {
-    // split where the last [ was, and escape it
-    // this is a huge pita.  We now have to re-walk
-    // the contents of the would-be class to re-translate
-    // any characters that were passed through as-is
-    cs = pattern.substr(classStart + 1)
-    sp = this.parse(cs, SUBPARSE)
-    re = re.substr(0, reClassStart) + '\\[' + sp[0]
-    hasMagic = hasMagic || sp[1]
-  }
-
-  // handle the case where we had a +( thing at the *end*
-  // of the pattern.
-  // each pattern list stack adds 3 chars, and we need to go through
-  // and escape any | chars that were passed through as-is for the regexp.
-  // Go through and escape them, taking care not to double-escape any
-  // | chars that were already escaped.
-  for (pl = patternListStack.pop(); pl; pl = patternListStack.pop()) {
-    var tail = re.slice(pl.reStart + pl.open.length)
-    this.debug('setting tail', re, pl)
-    // maybe some even number of \, then maybe 1 \, followed by a |
-    tail = tail.replace(/((?:\\{2}){0,64})(\\?)\|/g, function (_, $1, $2) {
-      if (!$2) {
-        // the | isn't already escaped, so escape it.
-        $2 = '\\'
-      }
-
-      // need to escape all those slashes *again*, without escaping the
-      // one that we need for escaping the | character.  As it works out,
-      // escaping an even number of slashes can be done by simply repeating
-      // it exactly after itself.  That's why this trick works.
-      //
-      // I am sorry that you have to see this.
-      return $1 + $1 + $2 + '|'
-    })
-
-    this.debug('tail=%j\n   %s', tail, tail, pl, re)
-    var t = pl.type === '*' ? star
-      : pl.type === '?' ? qmark
-      : '\\' + pl.type
-
-    hasMagic = true
-    re = re.slice(0, pl.reStart) + t + '\\(' + tail
-  }
-
-  // handle trailing things that only matter at the very end.
-  clearStateChar()
-  if (escaping) {
-    // trailing \\
-    re += '\\\\'
-  }
-
-  // only need to apply the nodot start if the re starts with
-  // something that could conceivably capture a dot
-  var addPatternStart = false
-  switch (re.charAt(0)) {
-    case '.':
-    case '[':
-    case '(': addPatternStart = true
-  }
-
-  // Hack to work around lack of negative lookbehind in JS
-  // A pattern like: *.!(x).!(y|z) needs to ensure that a name
-  // like 'a.xyz.yz' doesn't match.  So, the first negative
-  // lookahead, has to look ALL the way ahead, to the end of
-  // the pattern.
-  for (var n = negativeLists.length - 1; n > -1; n--) {
-    var nl = negativeLists[n]
-
-    var nlBefore = re.slice(0, nl.reStart)
-    var nlFirst = re.slice(nl.reStart, nl.reEnd - 8)
-    var nlLast = re.slice(nl.reEnd - 8, nl.reEnd)
-    var nlAfter = re.slice(nl.reEnd)
-
-    nlLast += nlAfter
-
-    // Handle nested stuff like *(*.js|!(*.json)), where open parens
-    // mean that we should *not* include the ) in the bit that is considered
-    // "after" the negated section.
-    var openParensBefore = nlBefore.split('(').length - 1
-    var cleanAfter = nlAfter
-    for (i = 0; i < openParensBefore; i++) {
-      cleanAfter = cleanAfter.replace(/\)[+*?]?/, '')
-    }
-    nlAfter = cleanAfter
-
-    var dollar = ''
-    if (nlAfter === '' && isSub !== SUBPARSE) {
-      dollar = '$'
-    }
-    var newRe = nlBefore + nlFirst + nlAfter + dollar + nlLast
-    re = newRe
-  }
-
-  // if the re is not "" at this point, then we need to make sure
-  // it doesn't match against an empty path part.
-  // Otherwise a/* will match a/, which it should not.
-  if (re !== '' && hasMagic) {
-    re = '(?=.)' + re
-  }
-
-  if (addPatternStart) {
-    re = patternStart + re
-  }
-
-  // parsing just a piece of a larger pattern.
-  if (isSub === SUBPARSE) {
-    return [re, hasMagic]
-  }
-
-  // skip the regexp for non-magical patterns
-  // unescape anything in it, though, so that it'll be
-  // an exact match against a file etc.
-  if (!hasMagic) {
-    return globUnescape(pattern)
-  }
-
-  var flags = options.nocase ? 'i' : ''
-  try {
-    var regExp = new RegExp('^' + re + '$', flags)
-  } catch (er) {
-    // If it was an invalid regular expression, then it can't match
-    // anything.  This trick looks for a character after the end of
-    // the string, which is of course impossible, except in multi-line
-    // mode, but it's not a /m regex.
-    return new RegExp('$.')
-  }
-
-  regExp._glob = pattern
-  regExp._src = re
-
-  return regExp
-}
-
-minimatch.makeRe = function (pattern, options) {
-  return new Minimatch(pattern, options || {}).makeRe()
-}
-
-Minimatch.prototype.makeRe = makeRe
-function makeRe () {
-  if (this.regexp || this.regexp === false) return this.regexp
-
-  // at this point, this.set is a 2d array of partial
-  // pattern strings, or "**".
-  //
-  // It's better to use .match().  This function shouldn't
-  // be used, really, but it's pretty convenient sometimes,
-  // when you just want to work with a regex.
-  var set = this.set
-
-  if (!set.length) {
-    this.regexp = false
-    return this.regexp
-  }
-  var options = this.options
-
-  var twoStar = options.noglobstar ? star
-    : options.dot ? twoStarDot
-    : twoStarNoDot
-  var flags = options.nocase ? 'i' : ''
-
-  var re = set.map(function (pattern) {
-    return pattern.map(function (p) {
-      return (p === GLOBSTAR) ? twoStar
-      : (typeof p === 'string') ? regExpEscape(p)
-      : p._src
-    }).join('\\\/')
-  }).join('|')
-
-  // must match entire pattern
-  // ending in a * or ** will make it less strict.
-  re = '^(?:' + re + ')$'
-
-  // can match anything, as long as it's not this.
-  if (this.negate) re = '^(?!' + re + ').*$'
-
-  try {
-    this.regexp = new RegExp(re, flags)
-  } catch (ex) {
-    this.regexp = false
-  }
-  return this.regexp
-}
-
-minimatch.match = function (list, pattern, options) {
-  options = options || {}
-  var mm = new Minimatch(pattern, options)
-  list = list.filter(function (f) {
-    return mm.match(f)
-  })
-  if (mm.options.nonull && !list.length) {
-    list.push(pattern)
-  }
-  return list
-}
-
-Minimatch.prototype.match = match
-function match (f, partial) {
-  this.debug('match', f, this.pattern)
-  // short-circuit in the case of busted things.
-  // comments, etc.
-  if (this.comment) return false
-  if (this.empty) return f === ''
-
-  if (f === '/' && partial) return true
-
-  var options = this.options
-
-  // windows: need to use /, not \
-  if (path.sep !== '/') {
-    f = f.split(path.sep).join('/')
-  }
-
-  // treat the test path as a set of pathparts.
-  f = f.split(slashSplit)
-  this.debug(this.pattern, 'split', f)
-
-  // just ONE of the pattern sets in this.set needs to match
-  // in order for it to be valid.  If negating, then just one
-  // match means that we have failed.
-  // Either way, return on the first hit.
-
-  var set = this.set
-  this.debug(this.pattern, 'set', set)
-
-  // Find the basename of the path by looking for the last non-empty segment
-  var filename
-  var i
-  for (i = f.length - 1; i >= 0; i--) {
-    filename = f[i]
-    if (filename) break
-  }
-
-  for (i = 0; i < set.length; i++) {
-    var pattern = set[i]
-    var file = f
-    if (options.matchBase && pattern.length === 1) {
-      file = [filename]
-    }
-    var hit = this.matchOne(file, pattern, partial)
-    if (hit) {
-      if (options.flipNegate) return true
-      return !this.negate
-    }
-  }
-
-  // didn't get any hits.  this is success if it's a negative
-  // pattern, failure otherwise.
-  if (options.flipNegate) return false
-  return this.negate
-}
-
-// set partial to true to test if, for example,
-// "/a/b" matches the start of "/*/b/*/d"
-// Partial means, if you run out of file before you run
-// out of pattern, then that's fine, as long as all
-// the parts match.
-Minimatch.prototype.matchOne = function (file, pattern, partial) {
-  var options = this.options
-
-  this.debug('matchOne',
-    { 'this': this, file: file, pattern: pattern })
-
-  this.debug('matchOne', file.length, pattern.length)
-
-  for (var fi = 0,
-      pi = 0,
-      fl = file.length,
-      pl = pattern.length
-      ; (fi < fl) && (pi < pl)
-      ; fi++, pi++) {
-    this.debug('matchOne loop')
-    var p = pattern[pi]
-    var f = file[fi]
-
-    this.debug(pattern, p, f)
-
-    // should be impossible.
-    // some invalid regexp stuff in the set.
-    if (p === false) return false
-
-    if (p === GLOBSTAR) {
-      this.debug('GLOBSTAR', [pattern, p, f])
-
-      // "**"
-      // a/**/b/**/c would match the following:
-      // a/b/x/y/z/c
-      // a/x/y/z/b/c
-      // a/b/x/b/x/c
-      // a/b/c
-      // To do this, take the rest of the pattern after
-      // the **, and see if it would match the file remainder.
-      // If so, return success.
-      // If not, the ** "swallows" a segment, and try again.
-      // This is recursively awful.
-      //
-      // a/**/b/**/c matching a/b/x/y/z/c
-      // - a matches a
-      // - doublestar
-      //   - matchOne(b/x/y/z/c, b/**/c)
-      //     - b matches b
-      //     - doublestar
-      //       - matchOne(x/y/z/c, c) -> no
-      //       - matchOne(y/z/c, c) -> no
-      //       - matchOne(z/c, c) -> no
-      //       - matchOne(c, c) yes, hit
-      var fr = fi
-      var pr = pi + 1
-      if (pr === pl) {
-        this.debug('** at the end')
-        // a ** at the end will just swallow the rest.
-        // We have found a match.
-        // however, it will not swallow /.x, unless
-        // options.dot is set.
-        // . and .. are *never* matched by **, for explosively
-        // exponential reasons.
-        for (; fi < fl; fi++) {
-          if (file[fi] === '.' || file[fi] === '..' ||
-            (!options.dot && file[fi].charAt(0) === '.')) return false
-        }
-        return true
-      }
-
-      // ok, let's see if we can swallow whatever we can.
-      while (fr < fl) {
-        var swallowee = file[fr]
-
-        this.debug('\nglobstar while', file, fr, pattern, pr, swallowee)
-
-        // XXX remove this slice.  Just pass the start index.
-        if (this.matchOne(file.slice(fr), pattern.slice(pr), partial)) {
-          this.debug('globstar found match!', fr, fl, swallowee)
-          // found a match.
-          return true
-        } else {
-          // can't swallow "." or ".." ever.
-          // can only swallow ".foo" when explicitly asked.
-          if (swallowee === '.' || swallowee === '..' ||
-            (!options.dot && swallowee.charAt(0) === '.')) {
-            this.debug('dot detected!', file, fr, pattern, pr)
-            break
-          }
-
-          // ** swallows a segment, and continue.
-          this.debug('globstar swallow a segment, and continue')
-          fr++
-        }
-      }
-
-      // no match was found.
-      // However, in partial mode, we can't say this is necessarily over.
-      // If there's more *pattern* left, then
-      if (partial) {
-        // ran out of file
-        this.debug('\n>>> no match, partial?', file, fr, pattern, pr)
-        if (fr === fl) return true
-      }
-      return false
-    }
-
-    // something other than **
-    // non-magic patterns just have to match exactly
-    // patterns with magic have been turned into regexps.
-    var hit
-    if (typeof p === 'string') {
-      if (options.nocase) {
-        hit = f.toLowerCase() === p.toLowerCase()
-      } else {
-        hit = f === p
-      }
-      this.debug('string match', p, f, hit)
-    } else {
-      hit = f.match(p)
-      this.debug('pattern match', p, f, hit)
-    }
-
-    if (!hit) return false
-  }
-
-  // Note: ending in / means that we'll get a final ""
-  // at the end of the pattern.  This can only match a
-  // corresponding "" at the end of the file.
-  // If the file ends in /, then it can only match a
-  // a pattern that ends in /, unless the pattern just
-  // doesn't have any more for it. But, a/b/ should *not*
-  // match "a/b/*", even though "" matches against the
-  // [^/]*? pattern, except in partial mode, where it might
-  // simply not be reached yet.
-  // However, a/b/ should still satisfy a/*
-
-  // now either we fell off the end of the pattern, or we're done.
-  if (fi === fl && pi === pl) {
-    // ran out of pattern and filename at the same time.
-    // an exact hit!
-    return true
-  } else if (fi === fl) {
-    // ran out of file, but still had pattern left.
-    // this is ok if we're doing the match as part of
-    // a glob fs traversal.
-    return partial
-  } else if (pi === pl) {
-    // ran out of pattern, still have file left.
-    // this is only acceptable if we're on the very last
-    // empty segment of a file with a trailing slash.
-    // a/* should match a/b/
-    var emptyFileEnd = (fi === fl - 1) && (file[fi] === '')
-    return emptyFileEnd
-  }
-
-  // should be unreachable.
-  throw new Error('wtf?')
-}
-
-// replace stuff like \* with *
-function globUnescape (s) {
-  return s.replace(/\\(.)/g, '$1')
-}
-
-function regExpEscape (s) {
-  return s.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')
-}
+module.exports = factory();
 
 
 /***/ }),
@@ -10068,7 +26640,7 @@ module.exports = glob
 
 var fs = __webpack_require__(747)
 var rp = __webpack_require__(544)
-var minimatch = __webpack_require__(689)
+var minimatch = __webpack_require__(750)
 var Minimatch = minimatch.Minimatch
 var inherits = __webpack_require__(276)
 var EE = __webpack_require__(614).EventEmitter
@@ -10076,7 +26648,7 @@ var path = __webpack_require__(277)
 var assert = __webpack_require__(357)
 var isAbsolute = __webpack_require__(829)
 var globSync = __webpack_require__(133)
-var common = __webpack_require__(18)
+var common = __webpack_require__(214)
 var alphasort = common.alphasort
 var alphasorti = common.alphasorti
 var setopts = common.setopts
@@ -12452,14 +29024,6 @@ try{
 
 /***/ }),
 
-/***/ 706:
-/***/ (function(module) {
-
-module.exports = eval("require")("@actions/github");
-
-
-/***/ }),
-
 /***/ 714:
 /***/ (function(__unusedmodule, exports, __webpack_require__) {
 
@@ -12757,10 +29321,950 @@ exports.requestLog = requestLog;
 
 /***/ }),
 
+/***/ 730:
+/***/ (function(module) {
+
+module.exports = function btoa(str) {
+  return new Buffer(str).toString('base64')
+}
+
+
+/***/ }),
+
 /***/ 747:
 /***/ (function(module) {
 
 module.exports = require("fs");
+
+/***/ }),
+
+/***/ 750:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = minimatch
+minimatch.Minimatch = Minimatch
+
+var path = { sep: '/' }
+try {
+  path = __webpack_require__(277)
+} catch (er) {}
+
+var GLOBSTAR = minimatch.GLOBSTAR = Minimatch.GLOBSTAR = {}
+var expand = __webpack_require__(416)
+
+var plTypes = {
+  '!': { open: '(?:(?!(?:', close: '))[^/]*?)'},
+  '?': { open: '(?:', close: ')?' },
+  '+': { open: '(?:', close: ')+' },
+  '*': { open: '(?:', close: ')*' },
+  '@': { open: '(?:', close: ')' }
+}
+
+// any single thing other than /
+// don't need to escape / when using new RegExp()
+var qmark = '[^/]'
+
+// * => any number of characters
+var star = qmark + '*?'
+
+// ** when dots are allowed.  Anything goes, except .. and .
+// not (^ or / followed by one or two dots followed by $ or /),
+// followed by anything, any number of times.
+var twoStarDot = '(?:(?!(?:\\\/|^)(?:\\.{1,2})($|\\\/)).)*?'
+
+// not a ^ or / followed by a dot,
+// followed by anything, any number of times.
+var twoStarNoDot = '(?:(?!(?:\\\/|^)\\.).)*?'
+
+// characters that need to be escaped in RegExp.
+var reSpecials = charSet('().*{}+?[]^$\\!')
+
+// "abc" -> { a:true, b:true, c:true }
+function charSet (s) {
+  return s.split('').reduce(function (set, c) {
+    set[c] = true
+    return set
+  }, {})
+}
+
+// normalizes slashes.
+var slashSplit = /\/+/
+
+minimatch.filter = filter
+function filter (pattern, options) {
+  options = options || {}
+  return function (p, i, list) {
+    return minimatch(p, pattern, options)
+  }
+}
+
+function ext (a, b) {
+  a = a || {}
+  b = b || {}
+  var t = {}
+  Object.keys(b).forEach(function (k) {
+    t[k] = b[k]
+  })
+  Object.keys(a).forEach(function (k) {
+    t[k] = a[k]
+  })
+  return t
+}
+
+minimatch.defaults = function (def) {
+  if (!def || !Object.keys(def).length) return minimatch
+
+  var orig = minimatch
+
+  var m = function minimatch (p, pattern, options) {
+    return orig.minimatch(p, pattern, ext(def, options))
+  }
+
+  m.Minimatch = function Minimatch (pattern, options) {
+    return new orig.Minimatch(pattern, ext(def, options))
+  }
+
+  return m
+}
+
+Minimatch.defaults = function (def) {
+  if (!def || !Object.keys(def).length) return Minimatch
+  return minimatch.defaults(def).Minimatch
+}
+
+function minimatch (p, pattern, options) {
+  if (typeof pattern !== 'string') {
+    throw new TypeError('glob pattern string required')
+  }
+
+  if (!options) options = {}
+
+  // shortcut: comments match nothing.
+  if (!options.nocomment && pattern.charAt(0) === '#') {
+    return false
+  }
+
+  // "" only matches ""
+  if (pattern.trim() === '') return p === ''
+
+  return new Minimatch(pattern, options).match(p)
+}
+
+function Minimatch (pattern, options) {
+  if (!(this instanceof Minimatch)) {
+    return new Minimatch(pattern, options)
+  }
+
+  if (typeof pattern !== 'string') {
+    throw new TypeError('glob pattern string required')
+  }
+
+  if (!options) options = {}
+  pattern = pattern.trim()
+
+  // windows support: need to use /, not \
+  if (path.sep !== '/') {
+    pattern = pattern.split(path.sep).join('/')
+  }
+
+  this.options = options
+  this.set = []
+  this.pattern = pattern
+  this.regexp = null
+  this.negate = false
+  this.comment = false
+  this.empty = false
+
+  // make the set of regexps etc.
+  this.make()
+}
+
+Minimatch.prototype.debug = function () {}
+
+Minimatch.prototype.make = make
+function make () {
+  // don't do it more than once.
+  if (this._made) return
+
+  var pattern = this.pattern
+  var options = this.options
+
+  // empty patterns and comments match nothing.
+  if (!options.nocomment && pattern.charAt(0) === '#') {
+    this.comment = true
+    return
+  }
+  if (!pattern) {
+    this.empty = true
+    return
+  }
+
+  // step 1: figure out negation, etc.
+  this.parseNegate()
+
+  // step 2: expand braces
+  var set = this.globSet = this.braceExpand()
+
+  if (options.debug) this.debug = console.error
+
+  this.debug(this.pattern, set)
+
+  // step 3: now we have a set, so turn each one into a series of path-portion
+  // matching patterns.
+  // These will be regexps, except in the case of "**", which is
+  // set to the GLOBSTAR object for globstar behavior,
+  // and will not contain any / characters
+  set = this.globParts = set.map(function (s) {
+    return s.split(slashSplit)
+  })
+
+  this.debug(this.pattern, set)
+
+  // glob --> regexps
+  set = set.map(function (s, si, set) {
+    return s.map(this.parse, this)
+  }, this)
+
+  this.debug(this.pattern, set)
+
+  // filter out everything that didn't compile properly.
+  set = set.filter(function (s) {
+    return s.indexOf(false) === -1
+  })
+
+  this.debug(this.pattern, set)
+
+  this.set = set
+}
+
+Minimatch.prototype.parseNegate = parseNegate
+function parseNegate () {
+  var pattern = this.pattern
+  var negate = false
+  var options = this.options
+  var negateOffset = 0
+
+  if (options.nonegate) return
+
+  for (var i = 0, l = pattern.length
+    ; i < l && pattern.charAt(i) === '!'
+    ; i++) {
+    negate = !negate
+    negateOffset++
+  }
+
+  if (negateOffset) this.pattern = pattern.substr(negateOffset)
+  this.negate = negate
+}
+
+// Brace expansion:
+// a{b,c}d -> abd acd
+// a{b,}c -> abc ac
+// a{0..3}d -> a0d a1d a2d a3d
+// a{b,c{d,e}f}g -> abg acdfg acefg
+// a{b,c}d{e,f}g -> abdeg acdeg abdeg abdfg
+//
+// Invalid sets are not expanded.
+// a{2..}b -> a{2..}b
+// a{b}c -> a{b}c
+minimatch.braceExpand = function (pattern, options) {
+  return braceExpand(pattern, options)
+}
+
+Minimatch.prototype.braceExpand = braceExpand
+
+function braceExpand (pattern, options) {
+  if (!options) {
+    if (this instanceof Minimatch) {
+      options = this.options
+    } else {
+      options = {}
+    }
+  }
+
+  pattern = typeof pattern === 'undefined'
+    ? this.pattern : pattern
+
+  if (typeof pattern === 'undefined') {
+    throw new TypeError('undefined pattern')
+  }
+
+  if (options.nobrace ||
+    !pattern.match(/\{.*\}/)) {
+    // shortcut. no need to expand.
+    return [pattern]
+  }
+
+  return expand(pattern)
+}
+
+// parse a component of the expanded set.
+// At this point, no pattern may contain "/" in it
+// so we're going to return a 2d array, where each entry is the full
+// pattern, split on '/', and then turned into a regular expression.
+// A regexp is made at the end which joins each array with an
+// escaped /, and another full one which joins each regexp with |.
+//
+// Following the lead of Bash 4.1, note that "**" only has special meaning
+// when it is the *only* thing in a path portion.  Otherwise, any series
+// of * is equivalent to a single *.  Globstar behavior is enabled by
+// default, and can be disabled by setting options.noglobstar.
+Minimatch.prototype.parse = parse
+var SUBPARSE = {}
+function parse (pattern, isSub) {
+  if (pattern.length > 1024 * 64) {
+    throw new TypeError('pattern is too long')
+  }
+
+  var options = this.options
+
+  // shortcuts
+  if (!options.noglobstar && pattern === '**') return GLOBSTAR
+  if (pattern === '') return ''
+
+  var re = ''
+  var hasMagic = !!options.nocase
+  var escaping = false
+  // ? => one single character
+  var patternListStack = []
+  var negativeLists = []
+  var stateChar
+  var inClass = false
+  var reClassStart = -1
+  var classStart = -1
+  // . and .. never match anything that doesn't start with .,
+  // even when options.dot is set.
+  var patternStart = pattern.charAt(0) === '.' ? '' // anything
+  // not (start or / followed by . or .. followed by / or end)
+  : options.dot ? '(?!(?:^|\\\/)\\.{1,2}(?:$|\\\/))'
+  : '(?!\\.)'
+  var self = this
+
+  function clearStateChar () {
+    if (stateChar) {
+      // we had some state-tracking character
+      // that wasn't consumed by this pass.
+      switch (stateChar) {
+        case '*':
+          re += star
+          hasMagic = true
+        break
+        case '?':
+          re += qmark
+          hasMagic = true
+        break
+        default:
+          re += '\\' + stateChar
+        break
+      }
+      self.debug('clearStateChar %j %j', stateChar, re)
+      stateChar = false
+    }
+  }
+
+  for (var i = 0, len = pattern.length, c
+    ; (i < len) && (c = pattern.charAt(i))
+    ; i++) {
+    this.debug('%s\t%s %s %j', pattern, i, re, c)
+
+    // skip over any that are escaped.
+    if (escaping && reSpecials[c]) {
+      re += '\\' + c
+      escaping = false
+      continue
+    }
+
+    switch (c) {
+      case '/':
+        // completely not allowed, even escaped.
+        // Should already be path-split by now.
+        return false
+
+      case '\\':
+        clearStateChar()
+        escaping = true
+      continue
+
+      // the various stateChar values
+      // for the "extglob" stuff.
+      case '?':
+      case '*':
+      case '+':
+      case '@':
+      case '!':
+        this.debug('%s\t%s %s %j <-- stateChar', pattern, i, re, c)
+
+        // all of those are literals inside a class, except that
+        // the glob [!a] means [^a] in regexp
+        if (inClass) {
+          this.debug('  in class')
+          if (c === '!' && i === classStart + 1) c = '^'
+          re += c
+          continue
+        }
+
+        // if we already have a stateChar, then it means
+        // that there was something like ** or +? in there.
+        // Handle the stateChar, then proceed with this one.
+        self.debug('call clearStateChar %j', stateChar)
+        clearStateChar()
+        stateChar = c
+        // if extglob is disabled, then +(asdf|foo) isn't a thing.
+        // just clear the statechar *now*, rather than even diving into
+        // the patternList stuff.
+        if (options.noext) clearStateChar()
+      continue
+
+      case '(':
+        if (inClass) {
+          re += '('
+          continue
+        }
+
+        if (!stateChar) {
+          re += '\\('
+          continue
+        }
+
+        patternListStack.push({
+          type: stateChar,
+          start: i - 1,
+          reStart: re.length,
+          open: plTypes[stateChar].open,
+          close: plTypes[stateChar].close
+        })
+        // negation is (?:(?!js)[^/]*)
+        re += stateChar === '!' ? '(?:(?!(?:' : '(?:'
+        this.debug('plType %j %j', stateChar, re)
+        stateChar = false
+      continue
+
+      case ')':
+        if (inClass || !patternListStack.length) {
+          re += '\\)'
+          continue
+        }
+
+        clearStateChar()
+        hasMagic = true
+        var pl = patternListStack.pop()
+        // negation is (?:(?!js)[^/]*)
+        // The others are (?:<pattern>)<type>
+        re += pl.close
+        if (pl.type === '!') {
+          negativeLists.push(pl)
+        }
+        pl.reEnd = re.length
+      continue
+
+      case '|':
+        if (inClass || !patternListStack.length || escaping) {
+          re += '\\|'
+          escaping = false
+          continue
+        }
+
+        clearStateChar()
+        re += '|'
+      continue
+
+      // these are mostly the same in regexp and glob
+      case '[':
+        // swallow any state-tracking char before the [
+        clearStateChar()
+
+        if (inClass) {
+          re += '\\' + c
+          continue
+        }
+
+        inClass = true
+        classStart = i
+        reClassStart = re.length
+        re += c
+      continue
+
+      case ']':
+        //  a right bracket shall lose its special
+        //  meaning and represent itself in
+        //  a bracket expression if it occurs
+        //  first in the list.  -- POSIX.2 2.8.3.2
+        if (i === classStart + 1 || !inClass) {
+          re += '\\' + c
+          escaping = false
+          continue
+        }
+
+        // handle the case where we left a class open.
+        // "[z-a]" is valid, equivalent to "\[z-a\]"
+        if (inClass) {
+          // split where the last [ was, make sure we don't have
+          // an invalid re. if so, re-walk the contents of the
+          // would-be class to re-translate any characters that
+          // were passed through as-is
+          // TODO: It would probably be faster to determine this
+          // without a try/catch and a new RegExp, but it's tricky
+          // to do safely.  For now, this is safe and works.
+          var cs = pattern.substring(classStart + 1, i)
+          try {
+            RegExp('[' + cs + ']')
+          } catch (er) {
+            // not a valid class!
+            var sp = this.parse(cs, SUBPARSE)
+            re = re.substr(0, reClassStart) + '\\[' + sp[0] + '\\]'
+            hasMagic = hasMagic || sp[1]
+            inClass = false
+            continue
+          }
+        }
+
+        // finish up the class.
+        hasMagic = true
+        inClass = false
+        re += c
+      continue
+
+      default:
+        // swallow any state char that wasn't consumed
+        clearStateChar()
+
+        if (escaping) {
+          // no need
+          escaping = false
+        } else if (reSpecials[c]
+          && !(c === '^' && inClass)) {
+          re += '\\'
+        }
+
+        re += c
+
+    } // switch
+  } // for
+
+  // handle the case where we left a class open.
+  // "[abc" is valid, equivalent to "\[abc"
+  if (inClass) {
+    // split where the last [ was, and escape it
+    // this is a huge pita.  We now have to re-walk
+    // the contents of the would-be class to re-translate
+    // any characters that were passed through as-is
+    cs = pattern.substr(classStart + 1)
+    sp = this.parse(cs, SUBPARSE)
+    re = re.substr(0, reClassStart) + '\\[' + sp[0]
+    hasMagic = hasMagic || sp[1]
+  }
+
+  // handle the case where we had a +( thing at the *end*
+  // of the pattern.
+  // each pattern list stack adds 3 chars, and we need to go through
+  // and escape any | chars that were passed through as-is for the regexp.
+  // Go through and escape them, taking care not to double-escape any
+  // | chars that were already escaped.
+  for (pl = patternListStack.pop(); pl; pl = patternListStack.pop()) {
+    var tail = re.slice(pl.reStart + pl.open.length)
+    this.debug('setting tail', re, pl)
+    // maybe some even number of \, then maybe 1 \, followed by a |
+    tail = tail.replace(/((?:\\{2}){0,64})(\\?)\|/g, function (_, $1, $2) {
+      if (!$2) {
+        // the | isn't already escaped, so escape it.
+        $2 = '\\'
+      }
+
+      // need to escape all those slashes *again*, without escaping the
+      // one that we need for escaping the | character.  As it works out,
+      // escaping an even number of slashes can be done by simply repeating
+      // it exactly after itself.  That's why this trick works.
+      //
+      // I am sorry that you have to see this.
+      return $1 + $1 + $2 + '|'
+    })
+
+    this.debug('tail=%j\n   %s', tail, tail, pl, re)
+    var t = pl.type === '*' ? star
+      : pl.type === '?' ? qmark
+      : '\\' + pl.type
+
+    hasMagic = true
+    re = re.slice(0, pl.reStart) + t + '\\(' + tail
+  }
+
+  // handle trailing things that only matter at the very end.
+  clearStateChar()
+  if (escaping) {
+    // trailing \\
+    re += '\\\\'
+  }
+
+  // only need to apply the nodot start if the re starts with
+  // something that could conceivably capture a dot
+  var addPatternStart = false
+  switch (re.charAt(0)) {
+    case '.':
+    case '[':
+    case '(': addPatternStart = true
+  }
+
+  // Hack to work around lack of negative lookbehind in JS
+  // A pattern like: *.!(x).!(y|z) needs to ensure that a name
+  // like 'a.xyz.yz' doesn't match.  So, the first negative
+  // lookahead, has to look ALL the way ahead, to the end of
+  // the pattern.
+  for (var n = negativeLists.length - 1; n > -1; n--) {
+    var nl = negativeLists[n]
+
+    var nlBefore = re.slice(0, nl.reStart)
+    var nlFirst = re.slice(nl.reStart, nl.reEnd - 8)
+    var nlLast = re.slice(nl.reEnd - 8, nl.reEnd)
+    var nlAfter = re.slice(nl.reEnd)
+
+    nlLast += nlAfter
+
+    // Handle nested stuff like *(*.js|!(*.json)), where open parens
+    // mean that we should *not* include the ) in the bit that is considered
+    // "after" the negated section.
+    var openParensBefore = nlBefore.split('(').length - 1
+    var cleanAfter = nlAfter
+    for (i = 0; i < openParensBefore; i++) {
+      cleanAfter = cleanAfter.replace(/\)[+*?]?/, '')
+    }
+    nlAfter = cleanAfter
+
+    var dollar = ''
+    if (nlAfter === '' && isSub !== SUBPARSE) {
+      dollar = '$'
+    }
+    var newRe = nlBefore + nlFirst + nlAfter + dollar + nlLast
+    re = newRe
+  }
+
+  // if the re is not "" at this point, then we need to make sure
+  // it doesn't match against an empty path part.
+  // Otherwise a/* will match a/, which it should not.
+  if (re !== '' && hasMagic) {
+    re = '(?=.)' + re
+  }
+
+  if (addPatternStart) {
+    re = patternStart + re
+  }
+
+  // parsing just a piece of a larger pattern.
+  if (isSub === SUBPARSE) {
+    return [re, hasMagic]
+  }
+
+  // skip the regexp for non-magical patterns
+  // unescape anything in it, though, so that it'll be
+  // an exact match against a file etc.
+  if (!hasMagic) {
+    return globUnescape(pattern)
+  }
+
+  var flags = options.nocase ? 'i' : ''
+  try {
+    var regExp = new RegExp('^' + re + '$', flags)
+  } catch (er) {
+    // If it was an invalid regular expression, then it can't match
+    // anything.  This trick looks for a character after the end of
+    // the string, which is of course impossible, except in multi-line
+    // mode, but it's not a /m regex.
+    return new RegExp('$.')
+  }
+
+  regExp._glob = pattern
+  regExp._src = re
+
+  return regExp
+}
+
+minimatch.makeRe = function (pattern, options) {
+  return new Minimatch(pattern, options || {}).makeRe()
+}
+
+Minimatch.prototype.makeRe = makeRe
+function makeRe () {
+  if (this.regexp || this.regexp === false) return this.regexp
+
+  // at this point, this.set is a 2d array of partial
+  // pattern strings, or "**".
+  //
+  // It's better to use .match().  This function shouldn't
+  // be used, really, but it's pretty convenient sometimes,
+  // when you just want to work with a regex.
+  var set = this.set
+
+  if (!set.length) {
+    this.regexp = false
+    return this.regexp
+  }
+  var options = this.options
+
+  var twoStar = options.noglobstar ? star
+    : options.dot ? twoStarDot
+    : twoStarNoDot
+  var flags = options.nocase ? 'i' : ''
+
+  var re = set.map(function (pattern) {
+    return pattern.map(function (p) {
+      return (p === GLOBSTAR) ? twoStar
+      : (typeof p === 'string') ? regExpEscape(p)
+      : p._src
+    }).join('\\\/')
+  }).join('|')
+
+  // must match entire pattern
+  // ending in a * or ** will make it less strict.
+  re = '^(?:' + re + ')$'
+
+  // can match anything, as long as it's not this.
+  if (this.negate) re = '^(?!' + re + ').*$'
+
+  try {
+    this.regexp = new RegExp(re, flags)
+  } catch (ex) {
+    this.regexp = false
+  }
+  return this.regexp
+}
+
+minimatch.match = function (list, pattern, options) {
+  options = options || {}
+  var mm = new Minimatch(pattern, options)
+  list = list.filter(function (f) {
+    return mm.match(f)
+  })
+  if (mm.options.nonull && !list.length) {
+    list.push(pattern)
+  }
+  return list
+}
+
+Minimatch.prototype.match = match
+function match (f, partial) {
+  this.debug('match', f, this.pattern)
+  // short-circuit in the case of busted things.
+  // comments, etc.
+  if (this.comment) return false
+  if (this.empty) return f === ''
+
+  if (f === '/' && partial) return true
+
+  var options = this.options
+
+  // windows: need to use /, not \
+  if (path.sep !== '/') {
+    f = f.split(path.sep).join('/')
+  }
+
+  // treat the test path as a set of pathparts.
+  f = f.split(slashSplit)
+  this.debug(this.pattern, 'split', f)
+
+  // just ONE of the pattern sets in this.set needs to match
+  // in order for it to be valid.  If negating, then just one
+  // match means that we have failed.
+  // Either way, return on the first hit.
+
+  var set = this.set
+  this.debug(this.pattern, 'set', set)
+
+  // Find the basename of the path by looking for the last non-empty segment
+  var filename
+  var i
+  for (i = f.length - 1; i >= 0; i--) {
+    filename = f[i]
+    if (filename) break
+  }
+
+  for (i = 0; i < set.length; i++) {
+    var pattern = set[i]
+    var file = f
+    if (options.matchBase && pattern.length === 1) {
+      file = [filename]
+    }
+    var hit = this.matchOne(file, pattern, partial)
+    if (hit) {
+      if (options.flipNegate) return true
+      return !this.negate
+    }
+  }
+
+  // didn't get any hits.  this is success if it's a negative
+  // pattern, failure otherwise.
+  if (options.flipNegate) return false
+  return this.negate
+}
+
+// set partial to true to test if, for example,
+// "/a/b" matches the start of "/*/b/*/d"
+// Partial means, if you run out of file before you run
+// out of pattern, then that's fine, as long as all
+// the parts match.
+Minimatch.prototype.matchOne = function (file, pattern, partial) {
+  var options = this.options
+
+  this.debug('matchOne',
+    { 'this': this, file: file, pattern: pattern })
+
+  this.debug('matchOne', file.length, pattern.length)
+
+  for (var fi = 0,
+      pi = 0,
+      fl = file.length,
+      pl = pattern.length
+      ; (fi < fl) && (pi < pl)
+      ; fi++, pi++) {
+    this.debug('matchOne loop')
+    var p = pattern[pi]
+    var f = file[fi]
+
+    this.debug(pattern, p, f)
+
+    // should be impossible.
+    // some invalid regexp stuff in the set.
+    if (p === false) return false
+
+    if (p === GLOBSTAR) {
+      this.debug('GLOBSTAR', [pattern, p, f])
+
+      // "**"
+      // a/**/b/**/c would match the following:
+      // a/b/x/y/z/c
+      // a/x/y/z/b/c
+      // a/b/x/b/x/c
+      // a/b/c
+      // To do this, take the rest of the pattern after
+      // the **, and see if it would match the file remainder.
+      // If so, return success.
+      // If not, the ** "swallows" a segment, and try again.
+      // This is recursively awful.
+      //
+      // a/**/b/**/c matching a/b/x/y/z/c
+      // - a matches a
+      // - doublestar
+      //   - matchOne(b/x/y/z/c, b/**/c)
+      //     - b matches b
+      //     - doublestar
+      //       - matchOne(x/y/z/c, c) -> no
+      //       - matchOne(y/z/c, c) -> no
+      //       - matchOne(z/c, c) -> no
+      //       - matchOne(c, c) yes, hit
+      var fr = fi
+      var pr = pi + 1
+      if (pr === pl) {
+        this.debug('** at the end')
+        // a ** at the end will just swallow the rest.
+        // We have found a match.
+        // however, it will not swallow /.x, unless
+        // options.dot is set.
+        // . and .. are *never* matched by **, for explosively
+        // exponential reasons.
+        for (; fi < fl; fi++) {
+          if (file[fi] === '.' || file[fi] === '..' ||
+            (!options.dot && file[fi].charAt(0) === '.')) return false
+        }
+        return true
+      }
+
+      // ok, let's see if we can swallow whatever we can.
+      while (fr < fl) {
+        var swallowee = file[fr]
+
+        this.debug('\nglobstar while', file, fr, pattern, pr, swallowee)
+
+        // XXX remove this slice.  Just pass the start index.
+        if (this.matchOne(file.slice(fr), pattern.slice(pr), partial)) {
+          this.debug('globstar found match!', fr, fl, swallowee)
+          // found a match.
+          return true
+        } else {
+          // can't swallow "." or ".." ever.
+          // can only swallow ".foo" when explicitly asked.
+          if (swallowee === '.' || swallowee === '..' ||
+            (!options.dot && swallowee.charAt(0) === '.')) {
+            this.debug('dot detected!', file, fr, pattern, pr)
+            break
+          }
+
+          // ** swallows a segment, and continue.
+          this.debug('globstar swallow a segment, and continue')
+          fr++
+        }
+      }
+
+      // no match was found.
+      // However, in partial mode, we can't say this is necessarily over.
+      // If there's more *pattern* left, then
+      if (partial) {
+        // ran out of file
+        this.debug('\n>>> no match, partial?', file, fr, pattern, pr)
+        if (fr === fl) return true
+      }
+      return false
+    }
+
+    // something other than **
+    // non-magic patterns just have to match exactly
+    // patterns with magic have been turned into regexps.
+    var hit
+    if (typeof p === 'string') {
+      if (options.nocase) {
+        hit = f.toLowerCase() === p.toLowerCase()
+      } else {
+        hit = f === p
+      }
+      this.debug('string match', p, f, hit)
+    } else {
+      hit = f.match(p)
+      this.debug('pattern match', p, f, hit)
+    }
+
+    if (!hit) return false
+  }
+
+  // Note: ending in / means that we'll get a final ""
+  // at the end of the pattern.  This can only match a
+  // corresponding "" at the end of the file.
+  // If the file ends in /, then it can only match a
+  // a pattern that ends in /, unless the pattern just
+  // doesn't have any more for it. But, a/b/ should *not*
+  // match "a/b/*", even though "" matches against the
+  // [^/]*? pattern, except in partial mode, where it might
+  // simply not be reached yet.
+  // However, a/b/ should still satisfy a/*
+
+  // now either we fell off the end of the pattern, or we're done.
+  if (fi === fl && pi === pl) {
+    // ran out of pattern and filename at the same time.
+    // an exact hit!
+    return true
+  } else if (fi === fl) {
+    // ran out of file, but still had pattern left.
+    // this is ok if we're doing the match as part of
+    // a glob fs traversal.
+    return partial
+  } else if (pi === pl) {
+    // ran out of pattern, still have file left.
+    // this is only acceptable if we're on the very last
+    // empty segment of a file with a trailing slash.
+    // a/* should match a/b/
+    var emptyFileEnd = (fi === fl - 1) && (file[fi] === '')
+    return emptyFileEnd
+  }
+
+  // should be unreachable.
+  throw new Error('wtf?')
+}
+
+// replace stuff like \* with *
+function globUnescape (s) {
+  return s.replace(/\\(.)/g, '$1')
+}
+
+function regExpEscape (s) {
+  return s.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')
+}
+
 
 /***/ }),
 
@@ -14915,6 +32419,16 @@ if (process.platform === 'linux') {
 
 /***/ }),
 
+/***/ 805:
+/***/ (function(module) {
+
+module.exports = function atob(str) {
+  return Buffer.from(str, 'base64').toString('binary')
+}
+
+
+/***/ }),
+
 /***/ 806:
 /***/ (function(module, exports) {
 
@@ -16745,6 +34259,34 @@ module.exports = opts => {
 
 /***/ }),
 
+/***/ 844:
+/***/ (function(module) {
+
+module.exports = validateAuth;
+
+function validateAuth(auth) {
+  if (typeof auth === "string") {
+    return;
+  }
+
+  if (typeof auth === "function") {
+    return;
+  }
+
+  if (auth.username && auth.password) {
+    return;
+  }
+
+  if (auth.clientId && auth.clientSecret) {
+    return;
+  }
+
+  throw new Error(`Invalid "auth" option: ${JSON.stringify(auth)}`);
+}
+
+
+/***/ }),
+
 /***/ 851:
 /***/ (function(module) {
 
@@ -18394,6 +35936,42 @@ module.exports = require("net");
 
 /***/ }),
 
+/***/ 963:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = Octokit;
+
+const { request } = __webpack_require__(714);
+const Hook = __webpack_require__(344);
+
+const parseClientOptions = __webpack_require__(575);
+
+function Octokit(plugins, options) {
+  options = options || {};
+  const hook = new Hook.Collection();
+  const log = Object.assign(
+    {
+      debug: () => {},
+      info: () => {},
+      warn: console.warn,
+      error: console.error
+    },
+    options && options.log
+  );
+  const api = {
+    hook,
+    log,
+    request: request.defaults(parseClientOptions(options, log, hook))
+  };
+
+  plugins.forEach(pluginFunction => pluginFunction(api, options));
+
+  return api;
+}
+
+
+/***/ }),
+
 /***/ 973:
 /***/ (function(__unusedmodule, exports) {
 
@@ -18453,6 +36031,20 @@ function getWorkSpaceDirectory() {
 }
 exports.getWorkSpaceDirectory = getWorkSpaceDirectory;
 //# sourceMappingURL=config-variables.js.map
+
+/***/ }),
+
+/***/ 981:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+module.exports = getNextPage
+
+const getPage = __webpack_require__(22)
+
+function getNextPage (octokit, link, headers) {
+  return getPage(octokit, link, 'next', headers)
+}
+
 
 /***/ }),
 
