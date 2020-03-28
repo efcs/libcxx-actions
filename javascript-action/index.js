@@ -24,7 +24,8 @@ async function run() {
       output: 'output.html'
     });
     const files = ['output.html'];
-    const uploadResponse = await artifactClient.uploadArtifact(artifactName, files, rootDirectory, options);
+    const uploadResponse = await artifactClient.uploadArtifact(artifactName,
+        files, rootDirectory, artifactOptions);
 
   } catch (error) {
     core.setFailed(error.message);
