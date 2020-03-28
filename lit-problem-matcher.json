@@ -4,13 +4,14 @@
       "owner": "lit-problem-matcher",
       "pattern": [
         {
-          "regexp": "^[*]{20} TEST '(.*) :: ([^']*)' (\\w*) [*]{20}$",
+          "regexp": "^[*]{20} TEST '(.*) :: ([^']*)' (\\w*) [*]{20}",
           "code": 3,
           "fromPath": 1
         },
         {
-          "regexp": "(^[^\\*][\\s\\S]*?(?=\\n.*?\\*{20})$)",
-          "message": 1
+          "regexp": "^(?!\\*{20})(.*)$",
+          "message": 1,
+          "loop": true
         }
       ]
     }
