@@ -16,5 +16,10 @@ jobs:
         echo "::error ::$SINGLE_ERROR"
     - name: 'action test'
       uses: ./javascript-action/
+    - name: 'test problem matcher'
+      run: |
+        echo "::add-matcher::lit-problem-matcher.json"
+        cat test/Inputs/libcxx_output.txt
+        echo "::remove-matcher owner=lit-problem-matcher::"
 
 
