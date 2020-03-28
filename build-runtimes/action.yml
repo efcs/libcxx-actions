@@ -31,6 +31,10 @@ inputs:
   cmake_args:
     description: 'Additional arguments to pass to CMake when configuring'
     required: false
+  xunit_path:
+    description: 'The path to xunit results'
+    required: false
+    default: 'test/Inputs/libcxx_res
 runs:
   using: 'node12'
   main: 'main.js'

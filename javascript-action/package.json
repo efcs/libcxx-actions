@@ -25,7 +25,9 @@
   "homepage": "https://github.com/actions/javascript-action#readme",
   "dependencies": {
     "@actions/core": "^1.2.3",
-    "@octokit/rest": "^17.1.4"
+    "@actions/exec": "^1.0.3",
+    "@octokit/rest": "^17.1.4",
+    "xmldom": "^0.3.0"
   },
   "devDependencies": {
     "@zeit/ncc": "^0.20.5",
