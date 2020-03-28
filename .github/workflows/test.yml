@@ -15,8 +15,10 @@ jobs:
         export SINGLE_ERROR="$(cat test/Inputs/single_error.txt)"
         echo "::error ::$SINGLE_ERROR"
     - name: 'action test'
+      if: always()
       uses: ./javascript-action/
     - name: 'test problem matcher'
+      if: always()
       run: |
         echo "::add-matcher::lit-problem-matcher.json"
         cat test/Inputs/libcxx_logs.txt
