@@ -15,8 +15,6 @@ function handle_error(err) {
 }
 
 let create_annotations_for_results = function(xml_file) {
-  try {
-
     const xml_string = fs.readFileSync(xml_file, 'utf8');
     var parser = new DOMParser({
       errorHandler: {
@@ -43,14 +41,10 @@ let create_annotations_for_results = function(xml_file) {
       var output = 'TEST ';
       output = test_path;
       output += test_name;
-      output += " FAILED\n ";
+      output += "FAILED\n ";
       output += failures[0].firstChild.data;
-      var sanitized_output = output;
-      core.error(sanitized_output);
+      core.error(output);
     }
-  } catch (error) {
-    console.log(error);
-  }
 }
 
 module.exports = create_annotations_for_results;
