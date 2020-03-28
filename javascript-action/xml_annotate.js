@@ -43,9 +43,9 @@ let create_annotations_for_results = function(xml_file) {
       var output = 'TEST ';
       output = test_path;
       output += test_name;
-      output += " FAILED ";
-      output += failures[0].firstChild.data.replace('\n', '%0A');
-      var sanitized_output = output;
+      output += " FAILED\n ";
+      output += failures[0].firstChild.data;
+      var sanitized_output = output.replace('\n', '%0A');
       core.error(sanitized_output);
     }
   } catch (error) {
