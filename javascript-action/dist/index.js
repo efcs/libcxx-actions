@@ -4703,7 +4703,7 @@ module.exports = require("events");
 /***/ (function(__unusedmodule, __unusedexports, __webpack_require__) {
 
 const core = __webpack_require__(827);
-const wait = __webpack_require__(896);
+const create_annotations_for_results = __webpack_require__(896);
 
 
 // most @actions toolkit packages have async methods

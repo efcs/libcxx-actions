@@ -1,5 +1,5 @@
 const core = require('@actions/core');
-const wait = require('./xml_annotate');
+const create_annotations_for_results = require('./xml_annotate');
 
 
 // most @actions toolkit packages have async methods
