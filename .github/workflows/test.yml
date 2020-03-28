@@ -1,0 +1,13 @@
+name: breathing test
+
+on: push
+
+jobs:
+  basic_test:
+    runs-on: [ubuntu-latest]
+    steps:
+    - name: 'breathing test'
+      run: |
+        echo '::error ::Something went wrong'
+
+
